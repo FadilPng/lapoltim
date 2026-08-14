@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 180">
+  <!-- Gambar banner beranda kecamatan -->
+  <rect x="42" y="145" width="279" height="14" fill="#a98b50"/>
+  <path d="M75 81h215v64H75z" fill="#f8f5eb"/>
+  <path d="m63 81 120-54 120 54H63Z" fill="#ded3ad"/>
+  <path d="M105 99h39v46h-39zM222 99h39v46h-39z" fill="#8eb5b5"/>
+  <path d="M160 95h47v50h-47z" fill="#b89a52"/>
+  <path d="M169 105h29v40h-29z" fill="#315e64"/>
+  <path d="M183 40v34" stroke="#b89a52" stroke-width="3"/><path d="m183 40 20 8-20 8Z" fill="#b94c46"/>
+  <g transform="translate(28 91)"><circle cx="31" cy="20" r="10" fill="#dba171"/><path d="M18 48c0-14 5-21 13-21s15 7 15 21v34H18z" fill="#f5f1e7"/><path d="M22 82v35M42 82v35" stroke="#283f46" stroke-width="7"/></g>
+  <g transform="translate(291 94)"><circle cx="19" cy="20" r="10" fill="#c6865d"/><path d="M6 48c0-14 5-21 13-21s15 7 15 21v34H6z" fill="#1b6968"/><path d="M10 82v35M30 82v35" stroke="#283f46" stroke-width="7"/></g>
+</svg>
