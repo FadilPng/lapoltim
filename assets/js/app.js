@@ -5,6 +5,137 @@ const icon = (name, cls = '') => `<svg class="icon ${cls}" aria-hidden="true"><u
 const esc = (value = '') => String(value).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
 const uid = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 
+// Menampilkan status loading pada tombol (spinner + kunci klik) selama proses
+// ke Supabase berjalan, lalu mengembalikan tampilan semula lewat clearBtnLoading.
+function setBtnLoading(btn, label = 'Memproses...') {
+  if (!btn || btn.classList.contains('is-loading')) return;
+  btn.dataset.originalHtml = btn.innerHTML;
+  btn.classList.add('is-loading');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="btn-spinner"></span><span>${esc(label)}</span>`;
+}
+function clearBtnLoading(btn) {
+  if (!btn || !btn.classList.contains('is-loading')) return;
+  btn.classList.remove('is-loading');
+  btn.disabled = false;
+  if (btn.dataset.originalHtml !== undefined) { btn.innerHTML = btn.dataset.originalHtml; delete btn.dataset.originalHtml; }
+}
+
+// ===== Template Word (.docx) =====
+// Sebelumnya template surat cuma teks polos di textarea — sekarang staf desa
+// (termasuk yang kurang familiar dengan UI web) bisa unduh file Word, edit
+// bebas di Microsoft Word/WPS pakai variabel {{...}}, lalu unggah balik.
+// Saat surat dibuat, docxtemplater otomatis isi variabel ke file Word itu.
+const TEMPLATE_BUCKET = 'letter-templates';
+const LETTER_BUCKET = 'generated-letters';
+const DEFAULT_TEMPLATE_URL = 'assets/templates/default-template.docx';
+const slugType = (t = '') => t.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+// Ambil isi .docx yang akan dipakai untuk sebuah jenis surat: template hasil
+// unggahan desa kalau ada, kalau belum pernah unggah pakai template dasar bawaan.
+async function getTemplateDocxBuffer(type, villageId) {
+  let path = null;
+  if (villageId && villageId === state.currentVillageId) {
+    path = state.templates[type]?.docxPath || null;
+  } else if (villageId) {
+    // Dipakai kecamatan (belum punya state.templates desa lain): tanya langsung ke tabel.
+    const { data } = await sb.from('letter_templates').select('docx_path').eq('village_id', villageId).eq('letter_type', type).maybeSingle();
+    path = data?.docx_path || null;
+  }
+  if (path) {
+    const { data, error } = await sb.storage.from(TEMPLATE_BUCKET).download(path);
+    if (error) throw new Error('Gagal mengambil template Word dari server.');
+    return await data.arrayBuffer();
+  }
+  const res = await fetch(DEFAULT_TEMPLATE_URL);
+  if (!res.ok) throw new Error('Gagal memuat template Word dasar.');
+  return await res.arrayBuffer();
+}
+
+function newDocxtemplater(arrayBuffer) {
+  const zip = new PizZip(arrayBuffer);
+  return new window.docxtemplater(zip, { paragraphLoop: true, linebreaks: true, delimiters: { start: '{{', end: '}}' } });
+}
+
+function explainDocxError(err) {
+  const list = err?.properties?.errors;
+  if (Array.isArray(list) && list.length) return list.map(e => e.properties?.explanation || e.message).join('; ');
+  return err?.message || 'Terjadi kesalahan saat memproses dokumen Word.';
+}
+
+// Tombol "Unduh Word" di halaman Template Surat: kasih file .docx siap edit.
+async function downloadTemplateForEditing(type) {
+  try {
+    const buf = await getTemplateDocxBuffer(type, state.currentVillageId);
+    downloadBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }),
+      `Template ${type} - ${state.currentVillage || 'Desa'}.docx`);
+  } catch (err) { toast('Gagal mengunduh template', err.message, 'error'); }
+}
+
+// Tombol "Unggah dari Word": validasi file lalu simpan ke Supabase Storage
+// dan catat path-nya di tabel letter_templates.
+//
+// PENTING: tiap upload pakai NAMA FILE BARU (bukan menimpa path yang sama).
+// Kalau path sama ditimpa terus (upsert), Supabase Storage CDN kadang masih
+// menyajikan versi cache lama ke download() berikutnya — makanya sebelumnya
+// hasil generate surat "masih pakai template lama" walau sudah upload baru.
+// Dengan path unik per upload, masalah cache basi ini hilang total.
+async function uploadTemplateDocx(type, file) {
+  if (!file.name.toLowerCase().endsWith('.docx')) { toast('Format tidak didukung', 'Unggah file .docx hasil simpan dari Microsoft Word (bukan .doc atau .pdf).', 'error'); return; }
+  try { new PizZip(await file.arrayBuffer()); } catch { toast('File tidak valid', 'File ini bukan dokumen Word yang bisa dibaca, atau rusak.', 'error'); return; }
+  const oldPath = state.templates[type]?.docxPath || null;
+  const path = `${state.currentVillageId}/${slugType(type)}-${Date.now()}.docx`;
+  const { error: upErr } = await sb.storage.from(TEMPLATE_BUCKET).upload(path, file, { cacheControl: '0', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  if (upErr) { toast('Gagal mengunggah template', upErr.message, 'error'); return; }
+  const { error: dbErr } = await sb.from('letter_templates').upsert(
+    { village_id: state.currentVillageId, letter_type: type, docx_path: path, content: state.templates[type]?.content || defaultTemplate(type, state.currentVillage) },
+    { onConflict: 'village_id,letter_type' }
+  );
+  if (dbErr) { toast('Gagal menyimpan data template', dbErr.message, 'error'); return; }
+  if (oldPath && oldPath !== path) sb.storage.from(TEMPLATE_BUCKET).remove([oldPath]).catch(() => {}); // beres-beres, boleh gagal diam-diam
+  await loadTemplates(); renderApp();
+  toast('Template Word tersimpan', `${type} sekarang memakai format Word yang kamu unggah.`);
+}
+
+// Isi otomatis file Word (template aktif) dengan data surat, lalu simpan
+// hasilnya ke Storage dan kembalikan blob-nya untuk diunduh/dicetak.
+async function generateLetterDocx(letterId, letterData) {
+  const villageId = letterData.villageId || state.currentVillageId;
+  const buf = await getTemplateDocxBuffer(letterData.type, villageId);
+  let docTemplater;
+  try {
+    docTemplater = newDocxtemplater(buf);
+    docTemplater.render({ ...fillTemplateVars(letterData), jenis_surat: letterData.type, nama_desa: letterData.village || state.currentVillage });
+  } catch (err) { throw new Error(`Template Word "${letterData.type}" bermasalah: ${explainDocxError(err)}`); }
+  const outBlob = docTemplater.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  const path = `${villageId}/${letterId}.docx`;
+  const { error: upErr } = await sb.storage.from(LETTER_BUCKET).upload(path, outBlob, { upsert: true, cacheControl: '0', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  if (!upErr) await sb.from('letters').update({ docx_path: path }).eq('id', letterId);
+  return outBlob;
+}
+
+// Tombol "Unduh dokumen Word" di Status Surat / Surat Masuk: pakai file yang
+// sudah pernah dibuat kalau ada, kalau belum ada buat ulang dari template aktif.
+async function downloadLetterDocx(letter) {
+  try {
+    if (letter.docxPath) {
+      const { data, error } = await sb.storage.from(LETTER_BUCKET).download(letter.docxPath);
+      if (error) throw error;
+      downloadBlob(data, `${letter.number} - ${letter.citizen}.docx`);
+      return;
+    }
+    const blob = await generateLetterDocx(letter.id, letter);
+    downloadBlob(blob, `${letter.number} - ${letter.citizen}.docx`);
+  } catch (err) { toast('Gagal menyiapkan dokumen Word', err.message, 'error'); }
+}
+
 const LETTER_TYPES = [
   { name: 'Surat Permohonan', icon: 'mail', color: 'green', desc: 'Pengajuan permohonan resmi warga kepada pihak kecamatan.' },
   { name: 'Surat Keputusan', icon: 'shield', color: 'blue', desc: 'Naskah keputusan resmi yang diterbitkan pemerintah desa.' },
@@ -30,6 +161,8 @@ const emailFor = username => `${username.trim().toLowerCase()}@lapoltim.local`;
 
 // ===== Format tanggal ala Indonesia dari timestamp Supabase (ISO string) =====
 const MONTHS_ID = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+const MONTHS_ID_FULL = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+const DAYS_ID_FULL = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 function formatDateID(iso) {
   if (!iso) return '-';
   const d = new Date(iso);
@@ -52,7 +185,15 @@ function timeAgoID(iso) {
   return `${Math.floor(hr / 24)} hari lalu`;
 }
 
-const defaultTemplate = (type, villageName = 'Desa') => `PEMERINTAH KABUPATEN TAKALAR\nKECAMATAN POLONGBANGKENG TIMUR\n${villageName.toUpperCase()}\nAlamat: Jl. Poros Polongbangkeng Timur, Kabupaten Takalar\n\n${type.toUpperCase()}\nNomor: {{nomor_surat}}\n\nYang bertanda tangan di bawah ini, Pemerintah ${villageName}, menerangkan bahwa:\n\nNama            : {{nama_warga}}\nNIK             : {{nik}}\nTempat/Tgl Lahir: {{tempat_tanggal_lahir}}\nAlamat          : {{alamat}}\n\nDengan ini menerangkan bahwa surat ini dibuat untuk keperluan {{keperluan}} dan ditujukan kepada Pemerintah Kecamatan.\n\nDemikian surat ini dibuat dengan sebenarnya agar dapat dipergunakan sebagaimana mestinya.\n\n${villageName.replace('Desa ', '')}, {{tanggal}}\nKepala ${villageName}\n\n\n\n(____________________)`;
+function villageNameOf(v, fallback = 'Desa') {
+  if (!v) return fallback;
+  if (typeof v === 'string') return v || fallback;
+  if (Array.isArray(v)) return v[0]?.name || fallback;
+  if (typeof v === 'object') return v.name || fallback;
+  return String(v);
+}
+
+const defaultTemplate = (type, villageNameRaw = 'Desa') => { const villageName = villageNameOf(villageNameRaw); return `PEMERINTAH KABUPATEN TAKALAR\nKECAMATAN POLONGBANGKENG TIMUR\n${villageName.toUpperCase()}\nAlamat: Jl. Poros Polongbangkeng Timur, Kabupaten Takalar\n\n${type.toUpperCase()}\nNomor: {{nomor_surat}}\n\nYang bertanda tangan di bawah ini, Pemerintah ${villageName}, menerangkan bahwa:\n\nNama            : {{nama_warga}}\nNIK             : {{nik}}\nTempat/Tgl Lahir: {{tempat_tanggal_lahir}}\nAlamat          : {{alamat}}\n\nDengan ini menerangkan bahwa surat ini dibuat untuk keperluan {{keperluan}} dan ditujukan kepada Pemerintah Kecamatan.\n\nDemikian surat ini dibuat dengan sebenarnya agar dapat dipergunakan sebagaimana mestinya.\n\n${villageName.replace('Desa ', '')}, {{tanggal}}\nKepala ${villageName}\n\n\n\n(____________________)`; };
 
 const state = {
   role: null,
@@ -105,22 +246,22 @@ async function loadLettersDesa() {
 async function loadLettersCamat() {
   const { data, error } = await sb.from('letters').select('*, villages(name)').order('created_at', { ascending: false });
   if (error) { toast('Gagal memuat surat masuk', error.message, 'error'); state.incoming = []; return; }
-  state.incoming = (data || []).map(row => mapLetterRow(row, row.villages?.name));
+  state.incoming = (data || []).map(row => mapLetterRow(row, row.villages));
 }
 
 function mapLetterRow(row, villageNameOverride) {
   return {
     id: row.id, number: row.number, type: row.letter_type, citizen: row.citizen_name, nik: row.resident_nik || '',
-    village: villageNameOverride || state.currentVillage, purpose: row.purpose,
+    village: villageNameOf(villageNameOverride, state.currentVillage || 'Desa'), purpose: row.purpose,
     date: formatDateID(row.created_at), status: row.status, reason: row.reason || '',
-    updated: formatDateTimeID(row.updated_at)
+    updated: formatDateTimeID(row.updated_at), docxPath: row.docx_path || null, villageId: row.village_id
   };
 }
 
 async function loadTemplates() {
   const { data, error } = await sb.from('letter_templates').select('*').eq('village_id', state.currentVillageId);
   if (error) { toast('Gagal memuat template', error.message, 'error'); state.templates = {}; return; }
-  const byType = Object.fromEntries((data || []).map(t => [t.letter_type, { content: t.content, edited: formatDateTimeID(t.updated_at) }]));
+  const byType = Object.fromEntries((data || []).map(t => [t.letter_type, { content: t.content, docxPath: t.docx_path || null, edited: formatDateTimeID(t.updated_at) }]));
   state.templates = Object.fromEntries(LETTER_TYPES.map(t => [t.name, byType[t.name] || null]));
 }
 
@@ -230,6 +371,29 @@ function updateShellState() {
   const sidebar = $('.sidebar');
   if (overlay) overlay.style.display = state.mobileOpen ? 'block' : 'none';
   if (sidebar) sidebar.classList.toggle('open', state.mobileOpen);
+  updateNavBadges();
+}
+
+// Badge di sidebar & titik notifikasi bel dulunya angka statis di HTML.
+// Di sini dihitung ulang dari data Supabase yang sudah dimuat, tiap kali app
+// dirender ulang (login, aksi CRUD, refresh), supaya selalu mengikuti isi.
+function setNavBadge(page, count) {
+  const el = document.querySelector(`.nav-item[data-page="${page}"] .nav-badge`);
+  if (!el) return;
+  if (count > 0) { el.textContent = count > 99 ? '99+' : count; el.style.display = ''; }
+  else { el.style.display = 'none'; }
+}
+function updateNavBadges() {
+  const bell = $('.notification-btn');
+  if (state.role === 'desa') {
+    setNavBadge('inventory', LETTER_TYPES.length);
+    setNavBadge('status', state.letters.filter(l => ['Terkirim', 'Diterima'].includes(l.status)).length);
+    if (bell) bell.classList.toggle('has-notif', state.letters.length > 0);
+  } else if (state.role === 'camat') {
+    setNavBadge('incoming', state.incoming.filter(l => ['Terkirim', 'Diterima'].includes(l.status)).length);
+    setNavBadge('villages', state.villages.length);
+    if (bell) bell.classList.toggle('has-notif', state.incoming.length > 0);
+  }
 }
 
 // Ganti isi #content-area sambil menjaga fokus & posisi kursor input yang
@@ -388,6 +552,52 @@ function renderTemplateBody(letter) {
   return text.split('\n').map(line => line.trim() === '' ? '<br>' : `<p>${line}</p>`).join('');
 }
 
+// PENTING (perbaikan bug "pratinjau nggak mirip Word"): sebelumnya pratinjau
+// dibuat pakai mammoth.js, yang cuma mengubah docx jadi teks semi-polos —
+// perataan tengah, tabel, ukuran font, dsb TIDAK ikut terbawa, jadi hasilnya
+// beda jauh dari tampilan asli di Microsoft Word.
+//
+// Sekarang dipakai docx-preview, library yang memang dibuat untuk menggambar
+// ulang file .docx di browser SEPERSIS mungkin dengan Word (kop surat rata
+// tengah, tebal/miring, tabel, ukuran halaman, dst). docx-preview harus
+// menggambar ke elemen <div> yang benar-benar ada di halaman (bukan cuma
+// mengembalikan teks) — makanya kita render dulu ke elemen sementara yang
+// disisipkan tersembunyi di body, lalu ambil hasilnya jadi HTML biasa yang
+// bisa ditempel ke mana saja (modal, overlay pratinjau, jendela cetak).
+function docxFallbackHtml(letter) {
+  return `<div class="document-paper"><div class="doc-seal-row"><span class="doc-seal">T</span></div><div class="doc-body">${renderTemplateBody(letter)}</div></div>`;
+}
+async function renderDocumentBodyHtml(letter, opts = {}) {
+  // Dipakai khusus tombol "Edit teks manual (lanjutan) -> Pratinjau": di situ
+  // pengguna sengaja mau lihat teks manual yang lagi diketik, bukan isi file
+  // .docx (unggahan atau bawaan) — jadi jangan sentuh docx sama sekali.
+  if (opts.forceManualText) return docxFallbackHtml(letter);
+  let wrap = null;
+  try {
+    const villageId = letter.villageId || state.currentVillageId;
+    const buf = await getTemplateDocxBuffer(letter.type, villageId);
+    const docTemplater = newDocxtemplater(buf);
+    docTemplater.render({ ...fillTemplateVars(letter), jenis_surat: letter.type, nama_desa: letter.village || state.currentVillage });
+    const outBlob = docTemplater.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    // Dirender di elemen tersembunyi (bukan display:none, biar ukuran teks
+    // tetap terhitung benar) supaya docx-preview bisa menggambar dengan
+    // ukuran/posisi yang akurat sebelum kita ambil hasilnya.
+    wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:600px;opacity:0;pointer-events:none;';
+    document.body.appendChild(wrap);
+    await window.docx.renderAsync(outBlob, wrap, wrap, {
+      className: 'sipindu-docx', inWrapper: true, ignoreWidth: true, ignoreHeight: true,
+      experimental: true, breakPages: false, renderHeaders: true, renderFooters: true
+    });
+    const html = wrap.innerHTML;
+    return html && html.trim() ? `<div class="docx-preview-host">${html}</div>` : docxFallbackHtml(letter);
+  } catch (err) {
+    return docxFallbackHtml(letter);
+  } finally {
+    if (wrap) wrap.remove();
+  }
+}
+
 function renderInventory() {
   const counts = Object.fromEntries(LETTER_TYPES.map(t => [t.name, state.letters.filter(l => l.type === t.name).length]));
   return `${pageHeader('Inventaris Surat', 'Pilih jenis surat yang ingin dibuat dan diajukan ke kecamatan.', `<button class="btn btn-outline" data-page="templates">${icon('template', 'sm')} Kelola template</button><button class="btn btn-primary" data-action="new-letter">${icon('plus', 'sm')} Buat surat</button>`)}
@@ -410,7 +620,7 @@ function renderResidents() {
   return `${pageHeader('Data Warga', `Kelola data penduduk ${state.currentVillage} sebagai sumber pengisian surat.`, `<button class="btn btn-outline" data-action="export" data-export="residents">${icon('download', 'sm')} Ekspor data</button><button class="btn btn-primary" data-action="add-resident">${icon('user-plus', 'sm')} Tambah warga</button>`)}
     <div class="stats-grid">${statCard('users', 'Total warga terdata', state.residents.length.toLocaleString('id-ID'), `${heads} KK`)}${statCard('user', 'Laki-laki', male, `${state.residents.length ? Math.round(male / state.residents.length * 100) : 0}%`, 'blue')}${statCard('user', 'Perempuan', female, `${state.residents.length ? Math.round(female / state.residents.length * 100) : 0}%`, 'purple')}${statCard('home', 'Kepala keluarga', heads, 'terdata', 'orange')}</div>
     <div class="toolbar"><div class="toolbar-search"><span>${icon('search', 'sm')}</span><input id="resident-search" value="${esc(state.residentSearch)}" placeholder="Cari nama atau NIK..."></div><div style="width:170px">${comboboxHtml({ name: 'dusun-filter', id: 'dusun-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentDusun, options: [{ value: '', label: 'Semua dusun' }, { value: 'Dusun Barugaya', label: 'Dusun Barugaya' }, { value: 'Dusun Panaikang', label: 'Dusun Panaikang' }, { value: 'Dusun Bontomanai', label: 'Dusun Bontomanai' }] })}</div><div style="width:170px">${comboboxHtml({ name: 'gender-filter', id: 'gender-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentGender, options: [{ value: '', label: 'Semua jenis kelamin' }, { value: 'Laki-laki', label: 'Laki-laki' }, { value: 'Perempuan', label: 'Perempuan' }] })}</div><div class="toolbar-spacer"></div><button class="btn btn-sm btn-outline" data-action="reset-filter" data-scope="residents" ${hasFilter ? '' : 'disabled'}>${icon('x', 'sm')} Reset filter</button></div>
-    <div class="table-card"><table class="data-table"><thead><tr><th>NIK</th><th>Nama warga</th><th>Jenis kelamin</th><th>Tempat, tanggal lahir</th><th>Alamat</th><th>Status keluarga</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map((r, i) => `<tr><td class="primary">${esc(r.nik)}</td><td><div class="table-user"><span class="avatar ${i % 2 ? 'green' : ''}">${initials(r.name)}</span><span class="primary">${esc(r.name)}</span></div></td><td>${esc(r.gender)}</td><td>${esc(r.birth)}</td><td>${esc(r.address)}</td><td>${esc(r.status)}</td><td><div class="table-actions"><button class="icon-btn" data-action="view-resident" data-nik="${r.nik}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="edit-resident" data-nik="${r.nik}">${icon('edit', 'sm')}</button></div></td></tr>`).join('') : `<tr><td colspan="7" class="empty-row">Tidak ada warga yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('residents', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} warga`)}</div>`;
+    <div class="table-card"><table class="data-table"><thead><tr><th>NIK</th><th>Nama warga</th><th>Jenis kelamin</th><th>Tempat, tanggal lahir</th><th>Alamat</th><th>Status keluarga</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map((r, i) => `<tr><td class="primary">${esc(r.nik)}</td><td><div class="table-user"><span class="avatar ${i % 2 ? 'green' : ''}">${initials(r.name)}</span><span class="primary">${esc(r.name)}</span></div></td><td>${esc(r.gender)}</td><td>${esc(r.birth)}</td><td>${esc(r.address)}</td><td>${esc(r.status)}</td><td><div class="table-actions"><button class="icon-btn" data-action="view-resident" data-nik="${r.nik}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="edit-resident" data-nik="${r.nik}">${icon('edit', 'sm')}</button><button class="icon-btn icon-btn-danger" data-action="delete-resident" data-nik="${r.nik}" title="Hapus warga">${icon('x', 'sm')}</button></div></td></tr>`).join('') : `<tr><td colspan="7" class="empty-row">Tidak ada warga yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('residents', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} warga`)}</div>`;
 }
 function initials(name) { return name.replace(/[^A-Za-zÀ-ÿ ]/g, '').split(' ').filter(Boolean).slice(0, 2).map(x => x[0]).join('').toUpperCase() || 'WG'; }
 
@@ -433,14 +643,28 @@ function renderStatus() {
   return `${pageHeader('Status Surat', 'Pantau progres setiap usulan beserta catatan atau alasan dari kecamatan.', `<button class="btn btn-primary" data-action="new-letter">${icon('plus', 'sm')} Buat surat baru</button>`)}
     <div class="status-summary">${statusMini('Terkirim', counts.Terkirim, 'blue')}${statusMini('Diterima', counts.Diterima, 'orange')}${statusMini('Disetujui', counts.Disetujui, '')}${statusMini('Ditolak', counts.Ditolak, 'red')}</div>
     <div class="toolbar"><div class="toolbar-search"><span>${icon('search', 'sm')}</span><input id="status-search" value="${esc(state.statusSearch || '')}" placeholder="Cari nomor, jenis, atau warga..."></div><div style="width:150px">${comboboxHtml({ name: 'status-filter', id: 'status-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.statusFilter, options: ['Semua', 'Terkirim', 'Diterima', 'Disetujui', 'Ditolak'].map(s => ({ value: s, label: s })) })}</div><div style="width:150px">${comboboxHtml({ name: 'status-month', id: 'status-month', readOnly: true, size: 'combobox-sm', selectedValue: state.statusMonth, options: [{ value: '', label: 'Semua bulan' }, { value: 'Agustus 2026', label: 'Agustus 2026' }, { value: 'Juli 2026', label: 'Juli 2026' }] })}</div><div class="toolbar-spacer"></div><button class="btn btn-sm btn-outline" data-action="export" data-export="status">${icon('download', 'sm')} Unduh laporan</button></div>
-    <div class="table-card"><table class="data-table"><thead><tr><th>Nomor / Jenis</th><th>Nama warga</th><th>Tanggal</th><th>Status</th><th>Catatan / alasan</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map(l => `<tr><td><span class="primary">${esc(l.number)}</span><span class="secondary">${esc(l.type)}</span></td><td><span class="primary">${esc(l.citizen)}</span><span class="secondary">${esc(l.nik)}</span></td><td>${esc(l.date)}<span class="secondary">Diperbarui ${esc(l.updated)}</span></td><td>${statusBadge(l.status)}</td><td><div class="reason">${icon('info', 'sm')}<span>${esc(l.reason)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="view-letter" data-id="${l.id}">${icon('eye', 'sm')}</button>${l.status === 'Disetujui' ? `<button class="icon-btn" data-action="print-letter" data-id="${l.id}">${icon('printer', 'sm')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6" class="empty-row">Tidak ada surat yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('status', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} surat`)}</div>`;
+    <div class="table-card"><table class="data-table"><thead><tr><th>Nomor / Jenis</th><th>Nama warga</th><th>Tanggal</th><th>Status</th><th>Catatan / alasan</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map(l => `<tr><td><span class="primary">${esc(l.number)}</span><span class="secondary">${esc(l.type)}</span></td><td><span class="primary">${esc(l.citizen)}</span><span class="secondary">${esc(l.nik)}</span></td><td>${esc(l.date)}<span class="secondary">Diperbarui ${esc(l.updated)}</span></td><td>${statusBadge(l.status)}</td><td><div class="reason">${icon('info', 'sm')}<span>${esc(l.reason)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="view-letter" data-id="${l.id}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="download-letter-docx" data-id="${l.id}" title="Unduh dokumen Word">${icon('download', 'sm')}</button>${l.status === 'Disetujui' ? `<button class="icon-btn" data-action="print-letter" data-id="${l.id}">${icon('printer', 'sm')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6" class="empty-row">Tidak ada surat yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('status', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} surat`)}</div>`;
 }
 function statusMini(label, count, color) { return `<div class="status-mini"><i class="status-dot ${color}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`; }
 
 function renderTemplates() {
-  return `${pageHeader('Template Surat', 'Edit format sekali, simpan, lalu gunakan kembali untuk setiap pengajuan.', `<button class="btn btn-outline" data-action="template-guide">${icon('info', 'sm')} Panduan variabel</button>`)}
-    <div class="small-note mb-14">${icon('info', 'sm')} Gunakan variabel seperti <b>{{nama_warga}}</b>, <b>{{nik}}</b>, dan <b>{{keperluan}}</b>. Data akan terisi otomatis saat surat dibuat.</div>
-    <div class="template-grid">${LETTER_TYPES.map(t => `<article class="template-card color-${t.color}"><div class="template-preview"><div class="paper-mini"><i class="paper-logo"></i><i class="paper-line dark"></i><i class="paper-line short"></i><br><i class="paper-line"></i><i class="paper-line"></i><i class="paper-line"></i><i class="paper-line short"></i></div></div><div class="template-info"><span class="badge approved">Aktif</span><h3>${t.name}</h3><p>Format baku ${t.name.toLowerCase()} ${state.currentVillage} untuk pengajuan ke kecamatan.</p><div class="template-footer"><span class="edited">Diedit ${esc(state.templates[t.name]?.edited || '-')}</span><button class="btn btn-sm btn-outline" data-action="edit-template" data-type="${t.name}">${icon('edit', 'sm')} Edit template</button></div></div></article>`).join('')}</div>`;
+  return `${pageHeader('Template Surat', 'Unduh format Word, edit bebas seperti biasa, lalu unggah kembali. Tersimpan otomatis untuk setiap pengajuan.', `<button class="btn btn-outline" data-action="template-guide">${icon('info', 'sm')} Panduan variabel</button>`)}
+    <div class="small-note mb-14">${icon('info', 'sm')} Buka file Word yang diunduh, edit format/logo/kop surat sesuka hati, jangan hapus variabel seperti <b>{{nama_warga}}</b>, <b>{{nik}}</b>, dan <b>{{keperluan}}</b> — bagian itu akan terisi otomatis saat surat dibuat.</div>
+    <div class="template-grid">${LETTER_TYPES.map(t => {
+      const tpl = state.templates[t.name]; const isWord = !!tpl?.docxPath;
+      return `<article class="template-card color-${t.color}"><div class="template-preview"><div class="paper-mini"><i class="paper-logo"></i><i class="paper-line dark"></i><i class="paper-line short"></i><br><i class="paper-line"></i><i class="paper-line"></i><i class="paper-line"></i><i class="paper-line short"></i></div></div><div class="template-info">
+        <span class="badge ${isWord ? 'approved' : 'sent'}">${icon(isWord ? 'check' : 'file', 'sm')} ${isWord ? 'Format Word aktif' : 'Format dasar (belum diunggah)'}</span>
+        <h3>${t.name}</h3><p>Format baku ${t.name.toLowerCase()} ${state.currentVillage} untuk pengajuan ke kecamatan.</p>
+        <div class="template-footer">
+          <span class="edited">${isWord ? `Diunggah ${esc(tpl.edited || '-')}` : 'Pakai template dasar bawaan SIPINDU'}</span>
+          <div class="template-actions">
+            <button class="btn btn-sm btn-outline" data-action="download-template" data-type="${t.name}">${icon('download', 'sm')} Unduh Word</button>
+            <label class="btn btn-sm btn-secondary file-upload-btn">Unggah Word<input type="file" accept=".docx" class="hidden-file-input" data-upload-type="${t.name}"></label>
+          </div>
+        </div>
+        <button type="button" class="text-link" data-action="edit-template" data-type="${t.name}" style="margin-top:8px">Edit teks manual (lanjutan)</button>
+      </div></article>`;
+    }).join('')}</div>`;
 }
 
 function renderHistory() {
@@ -635,19 +859,25 @@ function openResidentDetail(resident) {
   openModal(`${modalHead('Detail warga', `Data penduduk ${state.currentVillage}.`, 'user')}<div class="modal-body"><div class="detail-list"><div class="detail-row"><span>NIK</span><strong>${esc(resident.nik)}</strong></div><div class="detail-row"><span>Nama lengkap</span><strong>${esc(resident.name)}</strong></div><div class="detail-row"><span>Jenis kelamin</span><strong>${esc(resident.gender)}</strong></div><div class="detail-row"><span>Tempat/Tgl lahir</span><strong>${esc(resident.birth)}</strong></div><div class="detail-row"><span>Alamat</span><strong>${esc(resident.address)}</strong></div><div class="detail-row"><span>Status keluarga</span><strong>${esc(resident.status)}</strong></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-primary" data-action="new-letter">${icon('mail', 'sm')} Buat surat</button></div>`);
 }
 
-function documentPaper(letter) {
-  return `<div class="document-paper"><div class="doc-seal-row"><span class="doc-seal">T</span></div><div class="doc-body">${renderTemplateBody(letter)}</div></div>`;
+function openConfirmDeleteResident(resident) {
+  openModal(`${modalHead('Hapus data warga', 'Tindakan ini tidak dapat dibatalkan.', 'x')}<div class="modal-body"><p>Yakin ingin menghapus data warga <strong>${esc(resident.name)}</strong> (NIK ${esc(resident.nik)}) dari data penduduk ${esc(state.currentVillage)}?</p></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Batal</button><button class="btn btn-danger" data-action="confirm-delete-resident" data-nik="${resident.nik}">${icon('x', 'sm')} Ya, hapus</button></div>`);
 }
 
-function openLetterView(letter) {
-  openModal(`${modalHead('Detail surat', `${letter.number} · ${letter.type}`, 'file')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${documentPaper(letter)}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>ID surat</span><strong>${esc(letter.id)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Dikirim</span><strong>${esc(letter.updated)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div><div class="detail-row"><span>Catatan/alasan</span><strong>${esc(letter.reason)}</strong></div></div><div class="decision-box"><h4>Alur berikutnya</h4><p>${letter.status === 'Disetujui' ? 'Surat sudah dicetak di kecamatan. Warga dapat mengambil dan menandatangani dokumen di loket.' : letter.status === 'Ditolak' ? 'Perbaiki kekurangan sesuai alasan penolakan, lalu ajukan kembali.' : 'Surat sedang dalam alur pemeriksaan Kecamatan Polongbangkeng Timur.'}</p></div></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak pratinjau</button></div>`, 'modal-xl');
+async function documentPaper(letter, opts = {}) {
+  return await renderDocumentBodyHtml(letter, opts);
 }
 
-function openReview(letter) {
+async function openLetterView(letter) {
+  const paper = await documentPaper(letter);
+  openModal(`${modalHead('Detail surat', `${letter.number} · ${letter.type}`, 'file')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${paper}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>ID surat</span><strong>${esc(letter.id)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Dikirim</span><strong>${esc(letter.updated)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div><div class="detail-row"><span>Catatan/alasan</span><strong>${esc(letter.reason)}</strong></div></div><div class="decision-box"><h4>Alur berikutnya</h4><p>${letter.status === 'Disetujui' ? 'Surat sudah dicetak di kecamatan. Warga dapat mengambil dan menandatangani dokumen di loket.' : letter.status === 'Ditolak' ? 'Perbaiki kekurangan sesuai alasan penolakan, lalu ajukan kembali.' : 'Surat sedang dalam alur pemeriksaan Kecamatan Polongbangkeng Timur.'}</p></div></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-secondary" data-action="download-letter-docx" data-id="${letter.id}">${icon('download', 'sm')} Unduh Word</button><button class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak pratinjau</button></div>`, 'modal-xl');
+}
+
+async function openReview(letter) {
   const actionable = ['Terkirim', 'Diterima'].includes(letter.status);
-  openModal(`<form id="decision-form" data-id="${letter.id}">${modalHead('Tinjau surat masuk', `${letter.village} · Dikirim ${letter.date}`, 'eye')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${documentPaper(letter)}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>Nomor</span><strong>${esc(letter.number)}</strong></div><div class="detail-row"><span>Jenis surat</span><strong>${esc(letter.type)}</strong></div><div class="detail-row"><span>Asal desa</span><strong>${esc(letter.village)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Keperluan</span><strong>${esc(letter.purpose)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div></div>
+  const paper = await documentPaper(letter);
+  openModal(`<form id="decision-form" data-id="${letter.id}">${modalHead('Tinjau surat masuk', `${letter.village} · Dikirim ${letter.date}`, 'eye')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${paper}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>Nomor</span><strong>${esc(letter.number)}</strong></div><div class="detail-row"><span>Jenis surat</span><strong>${esc(letter.type)}</strong></div><div class="detail-row"><span>Asal desa</span><strong>${esc(letter.village)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Keperluan</span><strong>${esc(letter.purpose)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div></div>
     <div class="decision-box"><h4>Keputusan & alasan</h4><p>Setiap perubahan status wajib disertai alasan atau catatan untuk pihak desa.</p><div class="field" style="margin:0"><textarea name="reason" placeholder="Tulis hasil pemeriksaan atau alasan keputusan..." ${actionable ? 'required' : ''}>${actionable ? '' : esc(letter.reason)}</textarea></div></div></div></div></div>
-    <div class="modal-foot"><button type="button" class="btn btn-outline" data-action="close-modal">Tutup</button>${actionable ? `<button type="submit" name="decision" value="Ditolak" class="btn btn-danger-soft">${icon('x', 'sm')} Tolak</button>${letter.status === 'Terkirim' ? `<button type="submit" name="decision" value="Diterima" class="btn btn-secondary">${icon('mail', 'sm')} Terima berkas</button>` : ''}<button type="submit" name="decision" value="Disetujui" class="btn btn-primary">${icon('check', 'sm')} Setujui</button>` : `<button type="button" class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak surat</button>`}</div></form>`, 'modal-xl');
+    <div class="modal-foot"><button type="button" class="btn btn-outline" data-action="close-modal">Tutup</button><button type="button" class="btn btn-secondary" data-action="download-letter-docx" data-id="${letter.id}">${icon('download', 'sm')} Unduh Word</button>${actionable ? `<button type="submit" name="decision" value="Ditolak" class="btn btn-danger-soft">${icon('x', 'sm')} Tolak</button>${letter.status === 'Terkirim' ? `<button type="submit" name="decision" value="Diterima" class="btn btn-secondary">${icon('mail', 'sm')} Terima berkas</button>` : ''}<button type="submit" name="decision" value="Disetujui" class="btn btn-primary">${icon('check', 'sm')} Setujui</button>` : `<button type="button" class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak surat</button>`}</div></form>`, 'modal-xl');
 }
 
 function openTemplateEditor(type) {
@@ -704,19 +934,23 @@ function setupGlobalSearch() {
     if (kind === 'letter') { const l = findLetter(rid); if (l) { state.page = state.role === 'camat' ? 'incoming' : 'status'; renderApp(); state.role === 'camat' ? openReview(l) : openLetterView(l); } }
     else if (kind === 'resident') { const r = state.residents.find(x => x.nik === rid); if (r) { state.page = 'residents'; renderApp(); openResidentDetail(r); } }
     else if (kind === 'village') { const v = state.villages.find(x => x.name === rid); if (v) { state.page = 'villages'; renderApp(); openVillageDetail(v); } }
-  });
+  }); // openReview/openLetterView bersifat async (nunggu render pratinjau docx); tidak perlu di-await di sini karena listener klik ini cuma memicu pembukaan modal, bukan menunggu hasilnya.
 }
 
-function openPreviewOverlay(letter) {
+async function openPreviewOverlay(letter, opts = {}) {
   const el = document.createElement('div');
   el.className = 'modal-backdrop preview-overlay';
-  el.innerHTML = `<section class="modal modal-lg"><div class="modal-head"><span class="modal-title-icon">${icon('eye')}</span><div><h2>Pratinjau surat</h2><p>Tampilan dokumen sesuai template aktif saat ini.</p></div><button class="icon-btn" data-close-preview="1">${icon('x', 'sm')}</button></div><div class="modal-body">${documentPaper(letter)}</div></section>`;
+  el.innerHTML = `<section class="modal modal-lg"><div class="modal-head"><span class="modal-title-icon">${icon('eye')}</span><div><h2>Pratinjau surat</h2><p>Tampilan dokumen sesuai template aktif saat ini.</p></div><button class="icon-btn" data-close-preview="1">${icon('x', 'sm')}</button></div><div class="modal-body"><div class="doc-preview-loading"><span class="btn-spinner"></span> Memuat pratinjau dari file Word...</div></div></section>`;
   document.body.appendChild(el);
+  const paper = await documentPaper(letter, opts);
+  const body = el.querySelector('.modal-body');
+  if (body) body.innerHTML = paper;
 }
-function printLetter(letter) {
+async function printLetter(letter) {
   const win = window.open('', '_blank', 'width=480,height=700');
   if (!win) { window.print(); return; }
-  win.document.write(`<!DOCTYPE html><html><head><title>${esc(letter.number)}</title><link rel="stylesheet" href="assets/css/styles.css"></head><body style="padding:24px;background:#fff"><script>window.onload=()=>{window.print();}<\/script>${documentPaper(letter)}</body></html>`);
+  const paper = await documentPaper(letter);
+  win.document.write(`<!DOCTYPE html><html><head><title>${esc(letter.number)}</title><link rel="stylesheet" href="assets/css/styles.css"></head><body style="padding:24px;background:#fff"><script>window.onload=()=>{window.print();}<\/script>${paper}</body></html>`);
   win.document.close();
 }
 function accountMenuModal(index) {
@@ -733,6 +967,36 @@ function notificationsModal() {
 }
 function helpModal() {
   return `${modalHead('Pusat bantuan', 'Hubungi tim dukungan Kecamatan Polongbangkeng Timur.', 'info')}<div class="modal-body"><div class="detail-list mb-14"><div class="detail-row"><span>Telepon</span><strong>(0418) 21001</strong></div><div class="detail-row"><span>Jam layanan</span><strong>Senin–Jumat, 08.00–16.00 WITA</strong></div></div><a class="btn btn-primary btn-block" href="https://wa.me/6281234421001" target="_blank" rel="noopener">${icon('send', 'sm')} Hubungi via WhatsApp</a></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button></div>`;
+}
+// Dulu cuma toast singkat — sekarang jadi modal supaya staf desa yang kurang
+// familiar dengan istilah "variabel" tetap bisa ikuti langkah-langkahnya
+// pelan-pelan, plus tabel lengkap arti tiap {{...}} yang bisa dipakai.
+function templateGuideModal() {
+  const vars = [
+    ['nama_warga', 'Nama lengkap warga yang mengajukan surat'],
+    ['nik', 'NIK (16 digit) warga pemohon'],
+    ['alamat', 'Alamat warga, diambil dari data di menu Data Warga'],
+    ['tempat_tanggal_lahir', 'Tempat dan tanggal lahir warga'],
+    ['keperluan', 'Keperluan surat yang diketik saat membuat surat'],
+    ['tanggal', 'Tanggal surat dibuat'],
+    ['nomor_surat', 'Nomor urut surat'],
+    ['jenis_surat', 'Nama jenis surat, misalnya "Surat Keterangan Domisili"'],
+    ['nama_desa', 'Nama desa yang mengeluarkan surat'],
+  ];
+  return `${modalHead('Panduan variabel template Word', 'Langkah lengkap supaya template Word terisi otomatis.', 'info')}
+    <div class="modal-body">
+      <ol class="guide-steps">
+        <li><b>Unduh dulu</b> file Word-nya lewat tombol <b>Unduh Word</b> pada jenis surat yang mau diedit.</li>
+        <li>Buka file itu di <b>Microsoft Word</b> atau <b>WPS Office</b> di komputer/HP.</li>
+        <li>Ubah bebas: logo, kop surat, tata letak, ukuran huruf, kalimat — apa saja boleh diganti.</li>
+        <li>Yang <b>tidak boleh</b> diubah atau dihapus adalah tulisan di dalam tanda kurung kurawal ganda, contoh <code>{{nama_warga}}</code>. Bagian ini yang nanti otomatis diisi sistem.</li>
+        <li>Simpan file (tetap dalam format <code>.docx</code>, jangan diubah jadi PDF), lalu unggah kembali lewat tombol <b>Unggah Word</b>.</li>
+      </ol>
+      <h3 class="section-title">Daftar variabel yang bisa dipakai</h3>
+      <div class="detail-list">${vars.map(([v, desc]) => `<div class="detail-row"><span class="tpl-var-tag">{{${v}}}</span><strong>${esc(desc)}</strong></div>`).join('')}</div>
+      <div class="small-note" style="margin-top:12px">${icon('info', 'sm')} Ketik variabel persis seperti di atas: huruf kecil semua, dua kurung kurawal di depan dan belakang, tanpa spasi tambahan di dalamnya. Salah ketik (mis. <code>{{Nama_Warga}}</code> atau <code>{ nama_warga }}</code>) membuat bagian itu tidak akan terisi.</div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-primary" data-action="close-modal">${icon('check', 'sm')} Mengerti</button></div>`;
 }
 function profileModal() {
   return `<form id="password-form">${modalHead('Profil & keamanan', state.role === 'camat' ? 'Admin Kecamatan Polongbangkeng Timur' : (state.currentVillage || 'Desa'), 'user')}<div class="modal-body"><div class="detail-list mb-14"><div class="detail-row"><span>Peran</span><strong>${state.role === 'camat' ? 'Camat / Admin Kecamatan' : 'Admin Desa'}</strong></div><div class="detail-row"><span>Nama</span><strong>${esc(state.profileName || '-')}</strong></div></div><label class="form-label">Ganti kata sandi</label><div class="field has-icon"><span class="prefix">${icon('lock', 'sm')}</span><input name="password" type="password" placeholder="Kata sandi baru (min. 6 karakter)" minlength="6" required></div></div><div class="modal-foot"><button type="button" class="btn btn-outline" data-action="logout">${icon('logout', 'sm')} Keluar</button><button type="submit" class="btn btn-primary">${icon('check', 'sm')} Simpan sandi baru</button></div></form>`;
@@ -762,9 +1026,23 @@ document.addEventListener('click', async e => {
   else if (action === 'add-resident') { openAddResident(); }
   else if (action === 'edit-resident') { openAddResident(state.residents.find(r => r.nik === el.dataset.nik)); }
   else if (action === 'view-resident') { openResidentDetail(state.residents.find(r => r.nik === el.dataset.nik)); }
-  else if (action === 'view-letter') { closeModal(); openLetterView(findLetter(el.dataset.id)); }
-  else if (action === 'review-letter') { closeModal(); openReview(findLetter(el.dataset.id)); }
+  else if (action === 'delete-resident') { openConfirmDeleteResident(state.residents.find(r => r.nik === el.dataset.nik)); }
+  else if (action === 'confirm-delete-resident') {
+    setBtnLoading(el, 'Menghapus...');
+    const nik = el.dataset.nik;
+    const resident = state.residents.find(r => r.nik === nik);
+    const { error } = await sb.from('residents').delete().eq('nik', nik).eq('village_id', state.currentVillageId);
+    clearBtnLoading(el);
+    if (error) { toast('Gagal menghapus data warga', error.message, 'error'); return; }
+    await loadResidents();
+    closeModal(); if (state.page === 'residents') renderApp();
+    toast('Data warga dihapus', `${resident?.name || 'Data'} telah dihapus dari data penduduk desa.`);
+  }
+  else if (action === 'view-letter') { closeModal(); await openLetterView(findLetter(el.dataset.id)); }
+  else if (action === 'review-letter') { closeModal(); await openReview(findLetter(el.dataset.id)); }
   else if (action === 'edit-template') { openTemplateEditor(el.dataset.type); }
+  else if (action === 'download-template') { setBtnLoading(el, 'Menyiapkan...'); await downloadTemplateForEditing(el.dataset.type); clearBtnLoading(el); }
+  else if (action === 'download-letter-docx') { setBtnLoading(el, 'Menyiapkan...'); await downloadLetterDocx(findLetter(el.dataset.id)); clearBtnLoading(el); }
   else if (action === 'add-account') { openAddAccount(); }
   else if (action === 'edit-account') { openAddAccount(state.accounts[+el.dataset.index], el.dataset.index); }
   else if (action === 'view-village') { openVillageDetail(state.villages.find(v => v.name === el.dataset.village)); }
@@ -774,7 +1052,9 @@ document.addEventListener('click', async e => {
   else if (action === 'account-menu') { openModal(accountMenuModal(+el.dataset.index)); }
   else if (action === 'account-toggle-status') {
     const idx = +el.dataset.index; const a = state.accounts[idx]; const newStatus = a.status === 'Aktif' ? 'Nonaktif' : 'Aktif';
+    setBtnLoading(el, 'Memproses...');
     const { error } = await sb.from('villages').update({ status: newStatus }).eq('id', a.id);
+    clearBtnLoading(el);
     if (error) { toast('Gagal memperbarui status', error.message, 'error'); return; }
     a.status = newStatus; const v = state.villages.find(v => v.id === a.id); if (v) v.status = newStatus;
     closeModal(); renderApp(); toast('Status akun diperbarui', `${a.name} kini berstatus ${a.status}.`);
@@ -786,7 +1066,9 @@ document.addEventListener('click', async e => {
   else if (action === 'help') { openModal(helpModal()); }
   else if (action === 'profile-menu') { openModal(profileModal()); }
   else if (action === 'refresh') {
+    setBtnLoading(el, 'Menyinkronkan...');
     await loadAllForRole();
+    clearBtnLoading(el);
     renderApp(); toast('Data tersinkron', 'Daftar sudah menggunakan data terbaru dari Supabase.');
   }
   else if (action === 'export') { exportData(el.dataset.export || 'residents'); }
@@ -804,20 +1086,22 @@ document.addEventListener('click', async e => {
     if (scope === 'incoming') { state.incomingSearch = ''; state.letterFilter = 'Semua'; state.villageFilter = ''; }
     state.pagination[scope] = 1; renderApp();
   }
-  else if (action === 'print-letter') { const l = findLetter(el.dataset.id); if (l) printLetter(l); else window.print(); }
-  else if (action === 'template-guide') toast('Panduan variabel', 'Variabel {{nama_warga}}, {{nik}}, {{alamat}}, {{tanggal}}, dan {{keperluan}} akan diisi otomatis.');
+  else if (action === 'print-letter') { const l = findLetter(el.dataset.id); if (l) await printLetter(l); else window.print(); }
+  else if (action === 'template-guide') openModal(templateGuideModal());
   else if (action === 'preview-new-letter') {
     const form = document.getElementById('new-letter-form'); if (!form) return;
     const fd = new FormData(form);
     const resident = state.residents.find(r => r.nik === fd.get('resident'));
     if (!resident || !fd.get('purpose')) { toast('Lengkapi data dulu', 'Pilih warga pemohon dan isi keperluan untuk melihat pratinjau.', 'error'); return; }
-    openPreviewOverlay({ number: fd.get('number'), type: fd.get('type'), citizen: resident.name, nik: resident.nik, village: state.currentVillage, purpose: fd.get('purpose'), date: fd.get('date') || formatDateID(new Date().toISOString()) });
+    await openPreviewOverlay({ number: fd.get('number'), type: fd.get('type'), citizen: resident.name, nik: resident.nik, village: state.currentVillage, purpose: fd.get('purpose'), date: fd.get('date') || formatDateID(new Date().toISOString()) });
   }
   else if (action === 'preview-template') {
     const form = document.getElementById('template-form'); const area = $('#template-editor'); if (!area || !form) return;
     const type = form.dataset.type; const backup = state.templates[type];
     state.templates[type] = { content: area.value, edited: backup?.edited };
-    openPreviewOverlay({ number: '140/000/DB/VIII/2026', type, citizen: 'Nama Warga Contoh', nik: '7305060000000000', village: state.currentVillage, purpose: 'contoh keperluan surat', date: formatDateID(new Date().toISOString()) });
+    // forceManualText: true -> pratinjau ini memang harus nunjukin teks manual
+    // yang lagi diketik di textarea, bukan file .docx (unggahan/bawaan).
+    await openPreviewOverlay({ number: '140/000/DB/VIII/2026', type, citizen: 'Nama Warga Contoh', nik: '7305060000000000', village: state.currentVillage, purpose: 'contoh keperluan surat', date: formatDateID(new Date().toISOString()) }, { forceManualText: true });
     state.templates[type] = backup;
   }
   else if (el.dataset.editor) {
@@ -832,8 +1116,22 @@ document.addEventListener('click', async e => {
   }
 });
 
+const SUBMIT_LOADING_LABELS = {
+  'login-form': 'Memproses masuk...',
+  'password-form': 'Menyimpan sandi...',
+  'new-letter-form': 'Mengirim surat...',
+  'resident-form': 'Menyimpan data...',
+  'template-form': 'Menyimpan template...',
+  'decision-form': 'Menyimpan keputusan...',
+  'account-form': 'Menyimpan...'
+};
+
 document.addEventListener('submit', async e => {
   e.preventDefault(); const form = e.target; const fd = new FormData(form);
+  const submitBtn = e.submitter || form.querySelector('button[type="submit"]');
+  const isNewAccount = form.id === 'account-form' && form.dataset.index === '';
+  setBtnLoading(submitBtn, isNewAccount ? 'Membuat akun...' : (SUBMIT_LOADING_LABELS[form.id] || 'Memproses...'));
+  try {
   if (form.id === 'login-form') {
     const username = fd.get('username').trim(), password = fd.get('password');
     await doLogin(username, password);
@@ -852,10 +1150,16 @@ document.addEventListener('submit', async e => {
       resident_nik: resident.nik, citizen_name: resident.name, purpose: fd.get('purpose'),
       status: 'Terkirim', reason: 'Menunggu pemeriksaan kelengkapan oleh petugas kecamatan.'
     };
-    const { error } = await sb.from('letters').insert(insertRow);
+    const { data: inserted, error } = await sb.from('letters').insert(insertRow).select().single();
     if (error) { toast('Gagal mengirim surat', error.message, 'error'); return; }
     await loadLettersDesa();
     closeModal(); state.page = 'status'; renderApp(); toast('Surat berhasil dikirim', `${insertRow.letter_type} untuk ${resident.name} masuk antrean kecamatan.`);
+    // Buat file Word terisi otomatis dari template aktif, lalu langsung unduh.
+    try {
+      const blob = await generateLetterDocx(inserted.id, { type: insertRow.letter_type, number: insertRow.number, citizen: resident.name, nik: resident.nik, village: state.currentVillage, villageId: state.currentVillageId, purpose: insertRow.purpose, date: formatDateID(inserted.created_at) });
+      downloadBlob(blob, `${insertRow.number} - ${resident.name}.docx`);
+      await loadLettersDesa();
+    } catch (err) { toast('Surat terkirim, dokumen Word belum siap', `${err.message} Coba unduh lagi dari halaman Status Surat.`, 'error'); }
   }
   if (form.id === 'resident-form') {
     const nik = fd.get('nik').trim(); const isEdit = state.residents.some(r => r.nik === nik);
@@ -885,10 +1189,9 @@ document.addEventListener('submit', async e => {
   if (form.id === 'account-form') {
     const idx = form.dataset.index;
     if (idx === '') {
-      const submitBtn = form.querySelector('button[type=submit]'); if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Membuat akun...'; }
       const payload = { villageName: fd.get('name'), district: fd.get('district'), username: fd.get('username'), password: fd.get('password'), adminName: fd.get('admin'), phone: fd.get('phone') };
       const { data, error } = await sb.functions.invoke('create-village-account', { body: payload });
-      if (error || data?.error) { toast('Gagal membuat akun desa', data?.error || error.message, 'error'); if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Buat akun desa'; } return; }
+      if (error || data?.error) { toast('Gagal membuat akun desa', data?.error || error.message, 'error'); return; }
       await loadVillagesCamat();
       closeModal(); if (state.page === 'accounts' || state.page === 'villages') renderApp();
       toast('Akun desa berhasil dibuat', `${payload.villageName} dapat login dengan username ${payload.username}.`);
@@ -901,6 +1204,9 @@ document.addEventListener('submit', async e => {
     await sb.from('profiles').update({ full_name: admin, phone }).eq('village_id', a.id).eq('role', 'desa');
     await loadVillagesCamat();
     closeModal(); if (state.page === 'accounts' || state.page === 'villages') renderApp(); toast('Data desa diperbarui', `${villageName} tersimpan.`);
+  }
+  } finally {
+    clearBtnLoading(submitBtn);
   }
 });
 
@@ -917,6 +1223,10 @@ document.addEventListener('change', e => {
   else if (id === 'history-month') { state.historyMonth = e.target.value; resetPage('history'); renderApp(); }
   else if (id === 'village-status-filter') { state.villageStatusFilter = e.target.value; resetPage('villages'); renderApp(); }
   else if (id === 'account-status-filter') { state.accountStatusFilter = e.target.value; renderApp(); }
+  else if (e.target.classList?.contains('hidden-file-input') && e.target.dataset.uploadType) {
+    const file = e.target.files?.[0]; const type = e.target.dataset.uploadType; e.target.value = '';
+    if (file) { const label = e.target.closest('.file-upload-btn'); if (label) label.classList.add('is-loading'); uploadTemplateDocx(type, file).finally(() => { if (label) label.classList.remove('is-loading'); }); }
+  }
 });
 
 document.addEventListener('input', e => {
@@ -933,11 +1243,47 @@ document.addEventListener('input', e => {
 
 setupGlobalSearch();
 
+// ===== Jam & tanggal berjalan di topbar =====
+// Sebelumnya teksnya statis (ditulis manual di HTML): "Kamis, 13 Agustus 2026"
+// dan "09:48 WITA", jadi nggak pernah berubah. Sekarang dibuat dinamis,
+// dihitung dari waktu asli perangkat lalu dikonversi ke zona waktu WITA
+// (Asia/Makassar, UTC+8) supaya akurat untuk kantor kecamatan/desa di
+// Takalar meskipun perangkat yang dipakai di zona waktu lain.
+function witaNow() {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Makassar', year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short'
+    }).formatToParts(new Date()).map(p => [p.type, p.value])
+  );
+  const weekdayIndex = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[parts.weekday];
+  const dateLabel = `${DAYS_ID_FULL[weekdayIndex]}, ${+parts.day} ${MONTHS_ID_FULL[+parts.month - 1]} ${parts.year}`;
+  const hh = parts.hour === '24' ? '00' : parts.hour; // Intl kadang kasih "24" utk tengah malam
+  return { dateLabel, timeLabel: `${hh}:${parts.minute} WITA` };
+}
+function updateTopbarClock() {
+  const dateEl = $('#topbar-date'); const timeEl = $('#topbar-time');
+  if (!dateEl && !timeEl) return;
+  const { dateLabel, timeLabel } = witaNow();
+  if (dateEl) dateEl.textContent = dateLabel;
+  if (timeEl) timeEl.textContent = timeLabel;
+}
+updateTopbarClock();
+setInterval(updateTopbarClock, 15000); // refresh tiap 15 detik, cukup buat jam menit-an di topbar
+
 (async function init() {
   showView('login'); // tampilkan login dulu supaya tidak blank saat sesi dicek
-  const { data: { session } } = await sb.auth.getSession();
-  if (session?.user) {
-    const ok = await loadProfileAndEnter(session.user.id);
-    if (!ok) { await sb.auth.signOut(); showView('login'); }
+  const overlay = document.createElement('div');
+  overlay.className = 'page-loading-overlay';
+  overlay.innerHTML = `<span class="btn-spinner"></span><span>Memeriksa sesi...</span>`;
+  document.body.appendChild(overlay);
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session?.user) {
+      const ok = await loadProfileAndEnter(session.user.id);
+      if (!ok) { await sb.auth.signOut(); showView('login'); }
+    }
+  } finally {
+    overlay.remove();
   }
 })();
