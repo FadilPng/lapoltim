@@ -1,23 +1,23 @@
 :root {
-  /* Primer — tinta hutan gelap, identitas Portal Desa */
-  --brand: #1F4438;
-  --brand-2: #14332A;
-  --brand-3: #E6EBE4;
-  --brand-4: #F1F3EE;
-  /* Identitas Portal Kecamatan — biru tua kertas resmi */
-  --navy: #223349;
-  --navy-2: #182535;
+  /* Primer — hijau emerald segar, identitas Portal Desa */
+  --brand: #1B8A5A;
+  --brand-2: #146B44;
+  --brand-3: #DEF2E6;
+  --brand-4: #EFFAF3;
+  /* Identitas Portal Kecamatan — hijau teal segar, masih satu keluarga hijau */
+  --navy: #0E7C6B;
+  --navy-2: #0A5F52;
   /* Aksen segel/cap — kuningan resmi, dipakai sangat terbatas */
   --brass: #A9762C;
   --brass-soft: #F3E9D5;
   --brass-2: #8A5F20;
-  --ink: #1C2420;
-  --muted: #6C7168;
-  --line: #DEDACC;
-  --line-2: #E9E5D8;
-  --soft: #F3F1E9;
-  --cream: #F8F6EF;
-  --paper: #F6F4EC;
+  --ink: #16261D;
+  --muted: #5C7268;
+  --line: #CFE4D8;
+  --line-2: #DCEEE4;
+  --soft: #EAF5EF;
+  --cream: #F2FAF5;
+  --paper: #F0F8F3;
   --white: #fff;
   --orange: #B8752E;
   --orange-soft: #F4E9D8;
@@ -44,8 +44,8 @@
 body[data-portal="camat"] {
   --brand: var(--navy);
   --brand-2: var(--navy-2);
-  --brand-3: #E3E7EC;
-  --brand-4: #EEF1F4;
+  --brand-3: #DCEEEA;
+  --brand-4: #EDF7F5;
 }
 
 * {
@@ -320,6 +320,63 @@ a {
   transition: .15s;
   white-space: nowrap;
   letter-spacing: .01em;
+}
+
+.btn:disabled,
+.btn.is-loading {
+  opacity: .72;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, .4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  display: inline-block;
+  animation: btn-spin .6s linear infinite;
+  flex: none;
+}
+
+.btn-outline .btn-spinner,
+.btn-secondary .btn-spinner {
+  border: 2px solid rgba(28, 36, 32, .18);
+  border-top-color: var(--ink);
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Overlay pemuatan layar penuh saat mengambil data awal dari Supabase */
+.page-loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  z-index: 999;
+}
+
+.page-loading-overlay .btn-spinner {
+  width: 26px;
+  height: 26px;
+  border-width: 3px;
+  border-color: rgba(27, 138, 90, .18);
+  border-top-color: var(--brand);
+}
+
+.page-loading-overlay span {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 600;
 }
 
 .btn-primary {
@@ -650,6 +707,11 @@ a {
   background: #f1f5f3;
 }
 
+.icon-btn-danger:hover {
+  color: #c0392b;
+  background: #fdecea;
+}
+
 .main-wrap {
   grid-column: 2;
   min-width: 0;
@@ -781,7 +843,7 @@ a {
   background: #f5f6f6;
 }
 
-.notification-btn::after {
+.notification-btn.has-notif::after {
   content: "";
   width: 6px;
   height: 6px;
@@ -1715,6 +1777,35 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.template-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.file-upload-btn {
+  position: relative;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-upload-btn.is-loading {
+  opacity: .6;
+  pointer-events: none;
+}
+
+.hidden-file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .edited {
@@ -2103,6 +2194,32 @@ a {
   display: block;
   content: "";
   margin: 4px 0;
+}
+
+/* Pratinjau berbasis docx-preview: biarkan halaman Word tampil apa adanya
+   (font, margin, tabel dari file asli), kita cuma kasih bingkai & jarak
+   biar rapi di dalam kartu abu-abu "document-preview". */
+.docx-preview-host {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+}
+.docx-preview-host .docx-wrapper {
+  background: transparent;
+  padding: 0;
+}
+.docx-preview-host .docx-wrapper > section.docx {
+  box-shadow: 0 4px 18px rgba(24, 32, 29, .14);
+  margin: 0 auto !important;
+}
+.doc-preview-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 400px;
+  color: var(--muted, #7a8b86);
+  font-size: 13px;
 }
 
 .review-info h3 {
