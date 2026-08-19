@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#223349">
-  <title>Portal Kecamatan — Lapoltim</title>
+  <title>Portal Kecamatan — SIPINDU</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
@@ -21,7 +21,7 @@
     <section class="portal-login-form">
       <div class="login-form-wrap">
         <a class="brand" href="index.html"><img class="brand-logo" src="assets/images/icon.png"
-            alt="Logo Lapoltim"><span class="brand-word">LAPOLTIM<small>POLONGBANGKENG TIMUR</small></span></a>
+            alt="Logo SIPINDU"><span class="brand-word">SIPINDU<small>POLONGBANGKENG TIMUR</small></span></a>
         <a class="back-link" href="index.html"><svg class="icon sm">
             <use href="assets/images/icons.svg#i-arrow-left"></use>
           </svg> Kembali ke pilihan portal</a>
@@ -70,8 +70,8 @@
   <div id="app-view" class="app-shell" data-role="camat" style="display:none">
     <div class="mobile-overlay" data-action="close-mobile" style="display:none"></div>
     <aside class="sidebar">
-      <div class="brand"><img class="brand-logo" src="assets/images/icon.png" alt="Logo Lapoltim"><span
-          class="brand-word">LAPOLTIM<small>POLONGBANGKENG TIMUR</small></span></div>
+      <div class="brand"><img class="brand-logo" src="assets/images/icon.png" alt="Logo SIPINDU"><span
+          class="brand-word">SIPINDU<small>POLONGBANGKENG TIMUR</small></span></div>
       <div class="sidebar-context"><span class="context-icon"><svg class="icon sm">
             <use href="assets/images/icons.svg#i-building"></use>
           </svg></span><span><strong>Kecamatan Polongbangkeng Timur</strong><span>Portal pengawasan</span></span></div>
@@ -108,7 +108,7 @@
         <button class="icon-btn mobile-menu" data-action="open-mobile"><svg class="icon">
             <use href="assets/images/icons.svg#i-menu"></use>
           </svg></button>
-        <div class="page-crumb"><span>Lapoltim / Portal Kecamatan</span><strong>Beranda</strong></div>
+        <div class="page-crumb"><span>SIPINDU / Portal Kecamatan</span><strong>Beranda</strong></div>
         <div class="top-search"><span><svg class="icon sm">
               <use href="assets/images/icons.svg#i-search"></use>
             </svg></span><input placeholder="Cari surat, warga, atau desa..." data-action="top-search"></div>
@@ -116,7 +116,7 @@
           <button class="icon-btn notification-btn" data-action="notifications"><svg class="icon sm">
               <use href="assets/images/icons.svg#i-bell"></use>
             </svg></button>
-          <div class="top-date"><strong>Kamis, 13 Agustus 2026</strong>09:48 WITA</div>
+          <div class="top-date"><strong id="topbar-date">Memuat...</strong><span id="topbar-time">--:-- WITA</span></div>
           <button class="icon-btn" data-action="logout" title="Keluar"><svg class="icon sm">
               <use href="assets/images/icons.svg#i-logout"></use>
             </svg></button>
@@ -129,6 +129,10 @@
   <div id="modal-root"></div>
   <div id="toast-root" class="toast-root"></div>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pizzip@3.2.0/dist/pizzip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docxtemplater@3.69.3/build/docxtemplater.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.6/dist/docx-preview.min.js"></script>
   <script src="assets/js/app.js"></script>
 </body>
 
