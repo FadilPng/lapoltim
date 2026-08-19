@@ -1,139 +1,88 @@
 <!DOCTYPE html>
-<html lang="id">
-
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#1F4438">
-  <title>Portal Desa — Lapoltim</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <html lang="id">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#1F4438">
+    <title>Portal Desa — SIPINDU</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link
-    href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;650;700;800&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
-    rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;650;700;800&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="assets/css/styles.css">
-</head>
+  </head>
+  <body data-portal="desa">
 
-<body data-portal="desa">
-
-  <!-- ===== LOGIN ===== -->
-  <main id="login-view" class="portal-login portal-login-desa">
-    <section class="portal-login-form">
-      <div class="login-form-wrap">
-        <a class="brand" href="index.html"><img class="brand-logo" src="assets/images/icon.png"
-            alt="Logo Lapoltim"><span class="brand-word">LAPOLTIM<small>POLONGBANGKENG TIMUR</small></span></a>
-        <a class="back-link" href="index.html"><svg class="icon sm">
-            <use href="assets/images/icons.svg#i-arrow-left"></use>
-          </svg> Kembali ke pilihan portal</a>
-        <div class="login-heading">
-          <span class="section-kicker">Akses perangkat desa</span>
-          <h1>Masuk Portal Desa</h1>
-          <p>Kelola data warga dan pengajuan surat Desa Barugaya.</p>
+    <!-- ===== LOGIN ===== -->
+    <main id="login-view" class="portal-login portal-login-desa">
+      <section class="portal-login-form">
+        <div class="login-form-wrap">
+          <a class="brand" href="index.html"><img class="brand-logo" src="assets/images/icon.png" alt="Logo SIPINDU"><span class="brand-word">SIPINDU<small>POLONGBANGKENG TIMUR</small></span></a>
+          <a class="back-link" href="index.html"><svg class="icon sm"><use href="assets/images/icons.svg#i-arrow-left"></use></svg> Kembali ke pilihan portal</a>
+          <div class="login-heading">
+            <span class="section-kicker">Akses perangkat desa</span>
+            <h1>Masuk Portal Desa</h1>
+            <p>Kelola data warga dan pengajuan surat Desa Barugaya.</p>
+          </div>
+          <form class="login-form" id="login-form">
+            <label class="form-label">Username</label>
+            <div class="field has-icon"><span class="prefix"><svg class="icon sm"><use href="assets/images/icons.svg#i-user"></use></svg></span><input name="username" autocomplete="username" placeholder="Masukkan username" value="kalekomaraa" required></div>
+            <label class="form-label">Kata sandi</label>
+            <div class="field has-icon"><span class="prefix"><svg class="icon sm"><use href="assets/images/icons.svg#i-lock"></use></svg></span><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Masukkan kata sandi" value="desakalekomara123" required><button type="button" class="password-toggle" data-action="toggle-password"><svg class="icon sm"><use href="assets/images/icons.svg#i-eye"></use></svg></button></div>
+            <div class="login-meta"><label class="checkbox"><input type="checkbox" checked> Ingat saya</label><button type="button" class="text-link" data-action="forgot">Lupa kata sandi?</button></div>
+            <button class="btn btn-primary btn-block" type="submit">Masuk ke sistem <svg class="icon sm"><use href="assets/images/icons.svg#i-chevron-right"></use></svg></button>
+            <div class="login-hint"><svg class="icon sm"><use href="assets/images/icons.svg#i-info"></use></svg> <span><b>Akun demo:</b> kalekomaraa / desakalekomara123</span></div>
+          </form>
+          <p class="login-help">Mengalami kendala akses? Hubungi administrator Kecamatan Polongbangkeng Timur.</p>
         </div>
-        <form class="login-form" id="login-form">
-          <label class="form-label">Username</label>
-          <div class="field has-icon"><span class="prefix"><svg class="icon sm">
-                <use href="assets/images/icons.svg#i-user"></use>
-              </svg></span><input name="username" autocomplete="username" placeholder="Masukkan username"
-              value="kalekomaraa" required></div>
-          <label class="form-label">Kata sandi</label>
-          <div class="field has-icon"><span class="prefix"><svg class="icon sm">
-                <use href="assets/images/icons.svg#i-lock"></use>
-              </svg></span><input id="login-password" name="password" type="password" autocomplete="current-password"
-              placeholder="Masukkan kata sandi" value="desakalekomara123" required><button type="button"
-              class="password-toggle" data-action="toggle-password"><svg class="icon sm">
-                <use href="assets/images/icons.svg#i-eye"></use>
-              </svg></button></div>
-          <div class="login-meta"><label class="checkbox"><input type="checkbox" checked> Ingat saya</label><button
-              type="button" class="text-link" data-action="forgot">Lupa kata sandi?</button></div>
-          <button class="btn btn-primary btn-block" type="submit">Masuk ke sistem <svg class="icon sm">
-              <use href="assets/images/icons.svg#i-chevron-right"></use>
-            </svg></button>
-          <div class="login-hint"><svg class="icon sm">
-              <use href="assets/images/icons.svg#i-info"></use>
-            </svg> <span><b>Akun demo:</b> kalekomaraa / desakalekomara123</span></div>
-        </form>
-        <p class="login-help">Mengalami kendala akses? Hubungi administrator Kecamatan Polongbangkeng Timur.</p>
-      </div>
-    </section>
-    <section class="portal-login-visual">
-      <div class="login-visual-copy"><span>PORTAL DESA</span>
-        <h2>Administrasi desa yang tertata.</h2>
-        <p>Buat surat dari data warga, kirim ke kecamatan, dan ikuti prosesnya.</p>
-      </div>
-      <img src="assets/images/desa.jpeg" alt="Ilustrasi kantor desa">
-      <div class="visual-file-note">Gambar: <code>assets/images/desa.jpeg</code></div>
-    </section>
-  </main>
+      </section>
+      <section class="portal-login-visual">
+        <div class="login-visual-copy"><span>PORTAL DESA</span><h2>Administrasi desa yang tertata.</h2><p>Buat surat dari data warga, kirim ke kecamatan, dan ikuti prosesnya.</p></div>
+        <img src="assets/images/desa.jpeg" alt="Ilustrasi kantor desa">
+        <div class="visual-file-note">Gambar: <code>assets/images/desa.jpeg</code></div>
+      </section>
+    </main>
 
-  <!-- ===== APLIKASI (setelah login) ===== -->
-  <div id="app-view" class="app-shell" data-role="desa" style="display:none">
-    <div class="mobile-overlay" data-action="close-mobile" style="display:none"></div>
-    <aside class="sidebar">
-      <div class="brand"><img class="brand-logo" src="assets/images/icon.png" alt="Logo Lapoltim"><span
-          class="brand-word">LAPOLTIM<small>POLONGBANGKENG TIMUR</small></span></div>
-      <div class="sidebar-context"><span class="context-icon"><svg class="icon sm">
-            <use href="assets/images/icons.svg#i-village"></use>
-          </svg></span><span><strong id="sidebar-village-name">Memuat...</strong><span
-            id="sidebar-village-district">Kec. Polongbangkeng Timur</span></span></div>
-      <div class="nav-label">Menu utama</div>
-      <nav class="nav">
-        <button class="nav-item active" data-page="dashboard"><svg class="icon">
-            <use href="assets/images/icons.svg#i-home"></use>
-          </svg><span>Beranda</span></button>
-        <button class="nav-item" data-page="inventory"><svg class="icon">
-            <use href="assets/images/icons.svg#i-mail"></use>
-          </svg><span>Inventaris Surat</span><span class="nav-badge">7</span></button>
-        <button class="nav-item" data-page="residents"><svg class="icon">
-            <use href="assets/images/icons.svg#i-users"></use>
-          </svg><span>Data Warga</span></button>
-        <button class="nav-item" data-page="status"><svg class="icon">
-            <use href="assets/images/icons.svg#i-send"></use>
-          </svg><span>Status Surat</span><span class="nav-badge">4</span></button>
-        <button class="nav-item" data-page="templates"><svg class="icon">
-            <use href="assets/images/icons.svg#i-template"></use>
-          </svg><span>Template Surat</span></button>
-        <button class="nav-item" data-page="history"><svg class="icon">
-            <use href="assets/images/icons.svg#i-history"></use>
-          </svg><span>Riwayat</span></button>
-      </nav>
-      <div class="nav-spacer"></div>
-      <div class="support-card"><strong>Butuh bantuan?</strong>
-        <p>Tim dukungan siap membantu kendala layanan Anda.</p><button data-action="help">Hubungi dukungan</button>
+    <!-- ===== APLIKASI (setelah login) ===== -->
+    <div id="app-view" class="app-shell" data-role="desa" style="display:none">
+      <div class="mobile-overlay" data-action="close-mobile" style="display:none"></div>
+      <aside class="sidebar">
+        <div class="brand"><img class="brand-logo" src="assets/images/icon.png" alt="Logo SIPINDU"><span class="brand-word">SIPINDU<small>POLONGBANGKENG TIMUR</small></span></div>
+        <div class="sidebar-context"><span class="context-icon"><svg class="icon sm"><use href="assets/images/icons.svg#i-village"></use></svg></span><span><strong id="sidebar-village-name">Memuat...</strong><span id="sidebar-village-district">Kec. Polongbangkeng Timur</span></span></div>
+        <div class="nav-label">Menu utama</div>
+        <nav class="nav">
+          <button class="nav-item active" data-page="dashboard"><svg class="icon"><use href="assets/images/icons.svg#i-home"></use></svg><span>Beranda</span></button>
+          <button class="nav-item" data-page="inventory"><svg class="icon"><use href="assets/images/icons.svg#i-mail"></use></svg><span>Inventaris Surat</span><span class="nav-badge">7</span></button>
+          <button class="nav-item" data-page="residents"><svg class="icon"><use href="assets/images/icons.svg#i-users"></use></svg><span>Data Warga</span></button>
+          <button class="nav-item" data-page="status"><svg class="icon"><use href="assets/images/icons.svg#i-send"></use></svg><span>Status Surat</span><span class="nav-badge">4</span></button>
+          <button class="nav-item" data-page="templates"><svg class="icon"><use href="assets/images/icons.svg#i-template"></use></svg><span>Template Surat</span></button>
+          <button class="nav-item" data-page="history"><svg class="icon"><use href="assets/images/icons.svg#i-history"></use></svg><span>Riwayat</span></button>
+        </nav>
+        <div class="nav-spacer"></div>
+        <div class="support-card"><strong>Butuh bantuan?</strong><p>Tim dukungan siap membantu kendala layanan Anda.</p><button data-action="help">Hubungi dukungan</button></div>
+        <div class="sidebar-profile"><span class="avatar" id="sidebar-avatar">--</span><span class="profile-copy"><strong id="sidebar-profile-name">--</strong><span>Staf Pelayanan</span></span><button class="icon-btn" data-action="profile-menu"><svg class="icon sm"><use href="assets/images/icons.svg#i-more"></use></svg></button></div>
+      </aside>
+      <div class="main-wrap">
+        <header class="topbar">
+          <button class="icon-btn mobile-menu" data-action="open-mobile"><svg class="icon"><use href="assets/images/icons.svg#i-menu"></use></svg></button>
+          <div class="page-crumb"><span>SIPINDU / Portal Desa</span><strong>Beranda</strong></div>
+          <div class="top-search"><span><svg class="icon sm"><use href="assets/images/icons.svg#i-search"></use></svg></span><input placeholder="Cari surat, warga, atau desa..." data-action="top-search"></div>
+          <div class="top-actions">
+            <button class="icon-btn notification-btn" data-action="notifications"><svg class="icon sm"><use href="assets/images/icons.svg#i-bell"></use></svg></button>
+            <div class="top-date"><strong id="topbar-date">Memuat...</strong><span id="topbar-time">--:-- WITA</span></div>
+            <button class="icon-btn" data-action="logout" title="Keluar"><svg class="icon sm"><use href="assets/images/icons.svg#i-logout"></use></svg></button>
+          </div>
+        </header>
+        <main class="content" id="content-area"></main>
       </div>
-      <div class="sidebar-profile"><span class="avatar" id="sidebar-avatar">--</span><span class="profile-copy"><strong
-            id="sidebar-profile-name">--</strong><span>Staf Pelayanan</span></span><button class="icon-btn"
-          data-action="profile-menu"><svg class="icon sm">
-            <use href="assets/images/icons.svg#i-more"></use>
-          </svg></button></div>
-    </aside>
-    <div class="main-wrap">
-      <header class="topbar">
-        <button class="icon-btn mobile-menu" data-action="open-mobile"><svg class="icon">
-            <use href="assets/images/icons.svg#i-menu"></use>
-          </svg></button>
-        <div class="page-crumb"><span>Lapoltim / Portal Desa</span><strong>Beranda</strong></div>
-        <div class="top-search"><span><svg class="icon sm">
-              <use href="assets/images/icons.svg#i-search"></use>
-            </svg></span><input placeholder="Cari surat, warga, atau desa..." data-action="top-search"></div>
-        <div class="top-actions">
-          <button class="icon-btn notification-btn" data-action="notifications"><svg class="icon sm">
-              <use href="assets/images/icons.svg#i-bell"></use>
-            </svg></button>
-          <div class="top-date"><strong>Kamis, 13 Agustus 2026</strong>09:48 WITA</div>
-          <button class="icon-btn" data-action="logout" title="Keluar"><svg class="icon sm">
-              <use href="assets/images/icons.svg#i-logout"></use>
-            </svg></button>
-        </div>
-      </header>
-      <main class="content" id="content-area"></main>
     </div>
-  </div>
 
-  <div id="modal-root"></div>
-  <div id="toast-root" class="toast-root"></div>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="assets/js/app.js"></script>
-</body>
-
-</html>
+    <div id="modal-root"></div>
+    <div id="toast-root" class="toast-root"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pizzip@3.2.0/dist/pizzip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docxtemplater@3.69.3/build/docxtemplater.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.6/dist/docx-preview.min.js"></script>
+    <script src="assets/js/app.js"></script>
+  </body>
+  </html>
