@@ -1,0 +1,12 @@
+{
+    "supabaseUrl": "https://shcypfzjncnbrydwegcb.supabase.co",
+    "secretKey": "sb_secret_UNlSCvfPMXi8CU7441FofQ_Hp79-hHv",
+  
+    "camatEmail": "polbangtimur@lapoltim.local",
+    "camatPassword": "polbangtimurcepat",
+  
+    "villageName": "Desa Kale Ko'mara",
+    "desaEmail": "kalekomara@lapoltim.local",
+    "desaPassword": "desakalekomara123",
+    "desaAdminName": "Parawangsa, S.H."
+  }

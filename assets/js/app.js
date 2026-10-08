@@ -59,9 +59,150 @@ async function getTemplateDocxBuffer(type, villageId) {
   return await res.arrayBuffer();
 }
 
-function newDocxtemplater(arrayBuffer) {
-  const zip = new PizZip(arrayBuffer);
-  return new window.docxtemplater(zip, { paragraphLoop: true, linebreaks: true, delimiters: { start: '{{', end: '}}' } });
+// ===== Tanda tangan elektronik (foto -> PNG latar transparan) =====
+// Kepala Desa & Camat cukup upload foto tanda tangan basah SEKALI. Latar putih
+// di foto otomatis dihapus (jadi transparan) di browser sebelum disimpan,
+// supaya waktu ditempel ke surat kelihatan seperti tinta asli, bukan kotak putih.
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Gagal membaca file gambar.'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+async function processSignatureImage(file) {
+  const img = await loadImageFromFile(file);
+  const MAX_W = 480; // batasi ukuran biar data tidak kebesaran
+  const scale = Math.min(1, MAX_W / img.width);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  URL.revokeObjectURL(img.src);
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = frame.data;
+  // Piksel terang (latar kertas) dihapus jadi transparan; piksel gelap (goresan
+  // tinta) dipertegas jadi hitam pekat supaya konsisten dan jelas saat dicetak.
+  for (let i = 0; i < d.length; i += 4) {
+    const brightness = (d[i] + d[i + 1] + d[i + 2]) / 3;
+    if (brightness > 195) {
+      d[i + 3] = 0;
+    } else {
+      const alpha = Math.min(255, Math.round((195 - brightness) * 2.4));
+      d[i] = 18; d[i + 1] = 22; d[i + 2] = 30; d[i + 3] = alpha;
+    }
+  }
+  ctx.putImageData(frame, 0, 0);
+  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height };
+}
+
+// dari dokumentasi resmi docxtemplater-image-module-free — ubah data URL base64
+// jadi ArrayBuffer yang bisa dipakai getImage().
+function base64DataURLToArrayBuffer(dataURL) {
+  const base64Regex = /^data:image\/(png|jpg|jpeg|svg|svg\+xml);base64,/;
+  if (!base64Regex.test(dataURL)) return false;
+  const binaryString = window.atob(dataURL.replace(base64Regex, ''));
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function signatureRowId(scope, villageId) { return scope === 'camat' ? 'camat' : `desa-${villageId}`; }
+
+async function getSignatureImage(scope, villageId) {
+  const { data, error } = await sb.from('signatures').select('*').eq('id', signatureRowId(scope, villageId)).maybeSingle();
+  if (error || !data) return null;
+  return { dataUrl: data.image_data, width: data.width, height: data.height, signerName: data.signer_name };
+}
+
+async function saveSignature(scope, file) {
+  const { dataUrl, width, height } = await processSignatureImage(file);
+  const payload = { id: signatureRowId(scope, state.currentVillageId), scope, image_data: dataUrl, width, height, signer_name: state.profileName || '', updated_at: new Date().toISOString() };
+  if (scope === 'desa') payload.village_id = state.currentVillageId;
+  const { error } = await sb.from('signatures').upsert(payload, { onConflict: 'id' });
+  if (error) throw new Error(error.message);
+  return { dataUrl, width, height };
+}
+
+// Nilai unik yang dipakai sementara sebagai "penanda lokasi" tanda tangan di
+// teks hasil render docxtemplater, sebelum diganti jadi gambar sungguhan.
+// String ini sengaja aneh & panjang supaya mustahil ketiban teks asli surat.
+const SIGNATURE_SENTINEL = '§TTD_SIGNATURE_9f3k2§';
+
+// ===== Sisip gambar ke docx TANPA library eksternal =====
+// docxtemplater-image-module-free (yang tadinya dipakai di sini) punya bug
+// lama yang tidak pernah diperbaiki: dia mengubah properti `namespaceURI`
+// pada elemen XML, padahal browser modern (Chrome/Firefox) membuat properti
+// itu read-only — jadi SELALU error "which has only a getter". Solusinya:
+// sisip gambar manual langsung ke struktur file .docx (yang sebenarnya cuma
+// arsip zip berisi file-file XML), tanpa lewat library bermasalah itu sama
+// sekali. `zip` di sini adalah instance PizZip hasil docTemplater.getZip().
+function embedImageIntoDocx(zip, dataUrl, widthPx, heightPx, sentinel) {
+  const buffer = base64DataURLToArrayBuffer(dataUrl);
+  if (!buffer) return false;
+  const isJpeg = /^data:image\/jpe?g/i.test(dataUrl);
+  const ext = isJpeg ? 'jpeg' : 'png';
+  const mime = isJpeg ? 'image/jpeg' : 'image/png';
+
+  // 1) Taruh file gambarnya di word/media/ dengan nama yang belum dipakai
+  const existingMedia = Object.keys(zip.files).filter(f => /^word\/media\/image\d+\./.test(f));
+  const nextMediaNum = existingMedia.reduce((max, f) => { const m = f.match(/image(\d+)\./); return m ? Math.max(max, parseInt(m[1], 10)) : max; }, 0) + 1;
+  const mediaName = `image${nextMediaNum}.${ext}`;
+  zip.file(`word/media/${mediaName}`, buffer);
+
+  // 2) Daftarkan relasi (relationship) baru menunjuk ke file gambar tadi
+  const relsPath = 'word/_rels/document.xml.rels';
+  let relsXml = zip.file(relsPath) ? zip.file(relsPath).asText() : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  const existingRelIds = [...relsXml.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10));
+  const relId = `rId${(existingRelIds.length ? Math.max(...existingRelIds) : 0) + 1}`;
+  relsXml = relsXml.replace('</Relationships>', `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${mediaName}"/></Relationships>`);
+  zip.file(relsPath, relsXml);
+
+  // 3) Pastikan [Content_Types].xml tahu cara membuka ekstensi gambar ini
+  const ctPath = '[Content_Types].xml';
+  let ctXml = zip.file(ctPath).asText();
+  if (!new RegExp(`Extension="${ext}"`).test(ctXml)) {
+    ctXml = ctXml.replace('</Types>', `<Default Extension="${ext}" ContentType="${mime}"/></Types>`);
+    zip.file(ctPath, ctXml);
+  }
+
+  // 4) Cari teks penanda di word/document.xml, ganti jadi elemen gambar XML asli
+  const docPath = 'word/document.xml';
+  let docXml = zip.file(docPath).asText();
+  const targetW = Math.min(150, widthPx || 150);
+  const ratio = widthPx ? Math.min(1, targetW / widthPx) : 1;
+  const dispW = Math.max(1, Math.round((widthPx || 150) * ratio));
+  const dispH = Math.max(1, Math.round((heightPx || 70) * ratio));
+  const emuW = dispW * 9525, emuH = dispH * 9525;
+  const docPrId = 990000 + nextMediaNum;
+  const drawingRun = `<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${emuW}" cy="${emuH}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${docPrId}" name="TandaTangan${docPrId}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${docPrId}" name="TandaTangan${docPrId}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${relId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${emuW}" cy="${emuH}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+
+  let replacedAny = false;
+  // Ulangi selama masih ada penanda tersisa (jaga-jaga tag dipakai >1 kali)
+  while (docXml.includes(sentinel)) {
+    const runRegex = new RegExp(`<w:r\\b[^>]*>(?:(?!</w:r>)[\\s\\S])*?${sentinel}(?:(?!</w:r>)[\\s\\S])*?</w:r>`);
+    const runMatch = docXml.match(runRegex);
+    if (!runMatch) break; // penanda ada tapi di luar struktur run yang kita duga -> berhenti, jangan asal potong
+    const runXml = runMatch[0];
+    const rPrMatch = runXml.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/);
+    const rPr = rPrMatch ? rPrMatch[0] : '';
+    const tMatch = runXml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/);
+    const fullText = tMatch ? tMatch[1] : sentinel;
+    const idx = fullText.indexOf(sentinel);
+    const before = idx >= 0 ? fullText.slice(0, idx) : '';
+    const after = idx >= 0 ? fullText.slice(idx + sentinel.length) : '';
+    let replacement = '';
+    if (before) replacement += `<w:r>${rPr}<w:t xml:space="preserve">${before}</w:t></w:r>`;
+    replacement += drawingRun;
+    if (after) replacement += `<w:r>${rPr}<w:t xml:space="preserve">${after}</w:t></w:r>`;
+    docXml = docXml.replace(runXml, replacement);
+    replacedAny = true;
+  }
+  if (replacedAny) zip.file(docPath, docXml);
+  return replacedAny;
 }
 
 function explainDocxError(err) {
@@ -104,21 +245,73 @@ async function uploadTemplateDocx(type, file) {
   toast('Template Word tersimpan', `${type} sekarang memakai format Word yang kamu unggah.`);
 }
 
-// Isi otomatis file Word (template aktif) dengan data surat, lalu simpan
-// hasilnya ke Storage dan kembalikan blob-nya untuk diunduh/dicetak.
+// Isi otomatis file Word (template aktif) dengan data surat, tempel tanda
+// tangan elektronik Kepala Desa kalau sudah diunggah, lalu simpan hasilnya ke
+// Storage dan kembalikan blob-nya untuk diunduh/dicetak. Ini SALINAN dengan
+// TTD KEPALA DESA — begitu disetujui camat, salinan KEDUA (isi sama persis,
+// tapi TTD Camat) dibuat otomatis lewat generateApprovalDocx(), file terpisah.
 async function generateLetterDocx(letterId, letterData) {
   const villageId = letterData.villageId || state.currentVillageId;
   const buf = await getTemplateDocxBuffer(letterData.type, villageId);
+  const sig = await getSignatureImage('desa', villageId);
   let docTemplater;
   try {
-    docTemplater = newDocxtemplater(buf);
-    docTemplater.render({ ...fillTemplateVars(letterData), jenis_surat: letterData.type, nama_desa: letterData.village || state.currentVillage });
+    docTemplater = new window.docxtemplater(new PizZip(buf), { paragraphLoop: true, linebreaks: true, delimiters: { start: '{{', end: '}}' } });
+    docTemplater.render({
+      ...fillTemplateVars(letterData), jenis_surat: letterData.type, nama_desa: letterData.village || state.currentVillage,
+      nama_penandatangan: sig?.signerName || '', jabatan_penandatangan: 'Kepala Desa',
+      tanda_tangan: sig ? SIGNATURE_SENTINEL : ''
+    });
   } catch (err) { throw new Error(`Template Word "${letterData.type}" bermasalah: ${explainDocxError(err)}`); }
-  const outBlob = docTemplater.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  const outZip = docTemplater.getZip();
+  if (sig) embedImageIntoDocx(outZip, sig.dataUrl, sig.width, sig.height, SIGNATURE_SENTINEL);
+  const outBlob = outZip.generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
   const path = `${villageId}/${letterId}.docx`;
   const { error: upErr } = await sb.storage.from(LETTER_BUCKET).upload(path, outBlob, { upsert: true, cacheControl: '0', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
   if (!upErr) await sb.from('letters').update({ docx_path: path }).eq('id', letterId);
   return outBlob;
+}
+
+// ===== Salinan bertanda tangan Camat (dokumen KEDUA, file terpisah) =====
+// PENTING: ini BUKAN surat dengan teks/isi berbeda. Ini surat yang SAMA PERSIS
+// (template & isi identik dengan yang dibuat desa) — cuma dirender ulang dengan
+// tanda tangan & nama penandatangan Camat, disimpan sebagai file .docx sendiri
+// (letters.approval_docx_path). Jadi kepala desa bisa cetak dua-duanya: satu
+// bertanda tangan dirinya sendiri, satu lagi bertanda tangan Camat — tidak
+// pernah digabung jadi satu kertas/tanda tangan.
+async function generateApprovalDocx(letter) {
+  const buf = await getTemplateDocxBuffer(letter.type, letter.villageId);
+  const sig = await getSignatureImage('camat', null);
+  let docTemplater;
+  try {
+    docTemplater = new window.docxtemplater(new PizZip(buf), { paragraphLoop: true, linebreaks: true, delimiters: { start: '{{', end: '}}' } });
+    docTemplater.render({
+      ...fillTemplateVars(letter), jenis_surat: letter.type, nama_desa: letter.village || state.currentVillage,
+      nama_penandatangan: sig?.signerName || '', jabatan_penandatangan: 'Camat Polongbangkeng Timur',
+      tanda_tangan: sig ? SIGNATURE_SENTINEL : ''
+    });
+  } catch (err) { throw new Error(`Template surat "${letter.type}" bermasalah: ${explainDocxError(err)}`); }
+  const outZip = docTemplater.getZip();
+  if (sig) embedImageIntoDocx(outZip, sig.dataUrl, sig.width, sig.height, SIGNATURE_SENTINEL);
+  const outBlob = outZip.generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  const path = `${letter.villageId}/${letter.id}-ttd-camat.docx`;
+  const { error: upErr } = await sb.storage.from(LETTER_BUCKET).upload(path, outBlob, { upsert: true, cacheControl: '0', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  if (upErr) throw new Error(upErr.message);
+  await sb.from('letters').update({ approval_docx_path: path, approved_at: new Date().toISOString() }).eq('id', letter.id);
+  return outBlob;
+}
+
+async function downloadApprovalDocx(letter) {
+  try {
+    if (letter.approvalDocxPath) {
+      const { data, error } = await sb.storage.from(LETTER_BUCKET).download(letter.approvalDocxPath);
+      if (error) throw error;
+      downloadBlob(data, `${letter.type} - ${letter.number} - TTD Camat.docx`);
+      return;
+    }
+    const blob = await generateApprovalDocx(letter);
+    downloadBlob(blob, `${letter.type} - ${letter.number} - TTD Camat.docx`);
+  } catch (err) { toast('Gagal menyiapkan dokumen TTD Camat', err.message, 'error'); }
 }
 
 // Tombol "Unduh dokumen Word" di Status Surat / Surat Masuk: pakai file yang
@@ -145,6 +338,9 @@ const LETTER_TYPES = [
   { name: 'Surat Undangan', icon: 'calendar', color: 'orange', desc: 'Undangan kegiatan, rapat, atau pertemuan resmi.' },
   { name: 'Surat Keterangan', icon: 'file', color: 'cyan', desc: 'Keterangan domisili, usaha, dan kebutuhan warga lainnya.' }
 ];
+
+const EDUCATION_LEVELS = ['Tidak Diketahui', 'Belum Sekolah', 'Tidak Tamat SD', 'SD/Sederajat', 'SMP/Sederajat', 'SMA/Sederajat', 'D1/D2/D3', 'S1', 'S2/S3'];
+const HEALTH_STATUSES = ['Sehat', 'Ibu Hamil', 'Disabilitas', 'Penyakit Kronis', 'Lainnya'];
 
 // ===== Koneksi Supabase =====
 // anon key aman ditaruh di client — akses data tetap dibatasi oleh RLS di database.
@@ -206,6 +402,9 @@ const state = {
   residentSearch: '',
   residentDusun: '',
   residentGender: '',
+  residentEducation: '',
+  residentHealth: '',
+  residentView: 'list',
   historyStatusFilter: '',
   historyVillageFilter: '',
   historyMonth: '',
@@ -234,7 +433,7 @@ const state = {
 async function loadResidents() {
   const { data, error } = await sb.from('residents').select('*').eq('village_id', state.currentVillageId).order('created_at', { ascending: false });
   if (error) { toast('Gagal memuat data warga', error.message, 'error'); state.residents = []; return; }
-  state.residents = (data || []).map(r => ({ nik: r.nik, name: r.name, gender: r.gender, birth: r.birth_place_date, address: r.address, status: r.family_status }));
+  state.residents = (data || []).map(r => ({ nik: r.nik, name: r.name, gender: r.gender, birth: r.birth_place_date, address: r.address, status: r.family_status, kk: r.kk_number || '', education: r.education || 'Tidak Diketahui', health: r.health_status || 'Sehat' }));
 }
 
 async function loadLettersDesa() {
@@ -254,7 +453,8 @@ function mapLetterRow(row, villageNameOverride) {
     id: row.id, number: row.number, type: row.letter_type, citizen: row.citizen_name, nik: row.resident_nik || '',
     village: villageNameOf(villageNameOverride, state.currentVillage || 'Desa'), purpose: row.purpose,
     date: formatDateID(row.created_at), status: row.status, reason: row.reason || '',
-    updated: formatDateTimeID(row.updated_at), docxPath: row.docx_path || null, villageId: row.village_id
+    updated: formatDateTimeID(row.updated_at), docxPath: row.docx_path || null, villageId: row.village_id,
+    approvalDocxPath: row.approval_docx_path || null
   };
 }
 
@@ -515,7 +715,7 @@ function downloadCsv(filename, rows) {
 }
 function exportData(kind) {
   if (kind === 'residents') {
-    downloadCsv('data-warga-barugaya.csv', [['NIK', 'Nama', 'Jenis Kelamin', 'Tempat Tanggal Lahir', 'Alamat', 'Status Keluarga'], ...state.residents.map(r => [r.nik, r.name, r.gender, r.birth, r.address, r.status])]);
+    downloadCsv('data-warga-barugaya.csv', [['NIK', 'Nama', 'Jenis Kelamin', 'Tempat Tanggal Lahir', 'Alamat', 'Status Keluarga', 'Nomor KK', 'Pendidikan', 'Kesehatan'], ...state.residents.map(r => [r.nik, r.name, r.gender, r.birth, r.address, r.status, r.kk, r.education, r.health])]);
   } else if (kind === 'status') {
     const filtered = state.statusFilter === 'Semua' ? state.letters : state.letters.filter(l => l.status === state.statusFilter);
     downloadCsv('laporan-status-surat.csv', [['Nomor', 'Jenis', 'Nama Warga', 'NIK', 'Tanggal', 'Status', 'Catatan'], ...filtered.map(l => [l.number, l.type, l.citizen, l.nik, l.date, l.status, l.reason])]);
@@ -576,9 +776,16 @@ async function renderDocumentBodyHtml(letter, opts = {}) {
   try {
     const villageId = letter.villageId || state.currentVillageId;
     const buf = await getTemplateDocxBuffer(letter.type, villageId);
-    const docTemplater = newDocxtemplater(buf);
-    docTemplater.render({ ...fillTemplateVars(letter), jenis_surat: letter.type, nama_desa: letter.village || state.currentVillage });
-    const outBlob = docTemplater.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const sig = await getSignatureImage('desa', villageId);
+    const docTemplater = new window.docxtemplater(new PizZip(buf), { paragraphLoop: true, linebreaks: true, delimiters: { start: '{{', end: '}}' } });
+    docTemplater.render({
+      ...fillTemplateVars(letter), jenis_surat: letter.type, nama_desa: letter.village || state.currentVillage,
+      nama_penandatangan: sig?.signerName || '', jabatan_penandatangan: 'Kepala Desa',
+      tanda_tangan: sig ? SIGNATURE_SENTINEL : ''
+    });
+    const outZip = docTemplater.getZip();
+    if (sig) embedImageIntoDocx(outZip, sig.dataUrl, sig.width, sig.height, SIGNATURE_SENTINEL);
+    const outBlob = outZip.generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
     // Dirender di elemen tersembunyi (bukan display:none, biar ukuran teks
     // tetap terhitung benar) supaya docx-preview bisa menggambar dengan
     // ukuran/posisi yang akurat sebelum kita ambil hasilnya.
@@ -605,22 +812,55 @@ function renderInventory() {
     <div class="inventory-grid" id="inventory-grid">${LETTER_TYPES.map(t => `<article class="letter-card color-${t.color}" data-letter-name="${t.name.toLowerCase()}"><div class="letter-card-top"><span class="letter-icon">${icon(t.icon, 'lg')}</span><span class="template-ready">${icon('check', 'sm')} Template aktif</span></div><h3>${t.name}</h3><p>${t.desc}</p><div class="letter-meta"><span>${counts[t.name] || 0} surat dibuat</span><button class="btn btn-sm btn-secondary" data-action="new-letter" data-type="${t.name}">Buat surat ${icon('chevron-right', 'sm')}</button></div></article>`).join('')}</div>`;
 }
 
+function educationTagClass(v) { return { 'S1': 'blue', 'S2/S3': 'blue', 'D1/D2/D3': 'purple', 'SMA/Sederajat': 'green' }[v] || ''; }
+function healthTagClass(v) { return { 'Disabilitas': 'orange', 'Penyakit Kronis': 'red', 'Ibu Hamil': 'purple' }[v] || (v === 'Sehat' ? 'green' : ''); }
+
 function renderResidents() {
   const q = state.residentSearch.toLowerCase();
   const filtered = state.residents.filter(r =>
     (!q || `${r.name} ${r.nik} ${r.address}`.toLowerCase().includes(q)) &&
     (!state.residentDusun || r.address.includes(state.residentDusun)) &&
-    (!state.residentGender || r.gender === state.residentGender)
+    (!state.residentGender || r.gender === state.residentGender) &&
+    (!state.residentEducation || r.education === state.residentEducation) &&
+    (!state.residentHealth || r.health === state.residentHealth)
   );
   const male = state.residents.filter(r => r.gender === 'Laki-laki').length;
   const female = state.residents.filter(r => r.gender === 'Perempuan').length;
   const heads = state.residents.filter(r => r.status === 'Kepala Keluarga').length;
-  const { pageItems, page, totalPages } = paginate(filtered, 'residents', 8);
-  const hasFilter = state.residentSearch || state.residentDusun || state.residentGender;
+  const hasFilter = state.residentSearch || state.residentDusun || state.residentGender || state.residentEducation || state.residentHealth;
+  const toolbar = `<div class="toolbar"><div class="toolbar-search"><span>${icon('search', 'sm')}</span><input id="resident-search" value="${esc(state.residentSearch)}" placeholder="Cari nama atau NIK..."></div><div style="width:160px">${comboboxHtml({ name: 'dusun-filter', id: 'dusun-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentDusun, options: [{ value: '', label: 'Semua dusun' }, { value: 'Dusun Barugaya', label: 'Dusun Barugaya' }, { value: 'Dusun Panaikang', label: 'Dusun Panaikang' }, { value: 'Dusun Bontomanai', label: 'Dusun Bontomanai' }] })}</div><div style="width:150px">${comboboxHtml({ name: 'gender-filter', id: 'gender-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentGender, options: [{ value: '', label: 'Semua kelamin' }, { value: 'Laki-laki', label: 'Laki-laki' }, { value: 'Perempuan', label: 'Perempuan' }] })}</div><div style="width:160px">${comboboxHtml({ name: 'education-filter', id: 'education-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentEducation, options: [{ value: '', label: 'Semua pendidikan' }, ...EDUCATION_LEVELS.map(v => ({ value: v, label: v }))] })}</div><div style="width:160px">${comboboxHtml({ name: 'health-filter', id: 'health-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentHealth, options: [{ value: '', label: 'Semua kesehatan' }, ...HEALTH_STATUSES.map(v => ({ value: v, label: v }))] })}</div><div class="toolbar-spacer"></div><button class="btn btn-sm btn-outline" data-action="reset-filter" data-scope="residents" ${hasFilter ? '' : 'disabled'}>${icon('x', 'sm')} Reset filter</button></div>`;
+  const viewToggle = `<div class="toolbar" style="margin-top:-4px"><div style="display:flex;gap:6px"><button class="btn btn-sm ${state.residentView === 'list' ? 'btn-secondary' : 'btn-outline'}" data-action="resident-view-list">${icon('users', 'sm')} Daftar warga</button><button class="btn btn-sm ${state.residentView === 'kk' ? 'btn-secondary' : 'btn-outline'}" data-action="resident-view-kk">${icon('home', 'sm')} Kelompok per KK</button></div><div class="toolbar-spacer"></div></div>`;
+  const body = state.residentView === 'kk' ? renderResidentsByKK(filtered) : renderResidentsTable(filtered);
   return `${pageHeader('Data Warga', `Kelola data penduduk ${state.currentVillage} sebagai sumber pengisian surat.`, `<button class="btn btn-outline" data-action="export" data-export="residents">${icon('download', 'sm')} Ekspor data</button><button class="btn btn-primary" data-action="add-resident">${icon('user-plus', 'sm')} Tambah warga</button>`)}
     <div class="stats-grid">${statCard('users', 'Total warga terdata', state.residents.length.toLocaleString('id-ID'), `${heads} KK`)}${statCard('user', 'Laki-laki', male, `${state.residents.length ? Math.round(male / state.residents.length * 100) : 0}%`, 'blue')}${statCard('user', 'Perempuan', female, `${state.residents.length ? Math.round(female / state.residents.length * 100) : 0}%`, 'purple')}${statCard('home', 'Kepala keluarga', heads, 'terdata', 'orange')}</div>
-    <div class="toolbar"><div class="toolbar-search"><span>${icon('search', 'sm')}</span><input id="resident-search" value="${esc(state.residentSearch)}" placeholder="Cari nama atau NIK..."></div><div style="width:170px">${comboboxHtml({ name: 'dusun-filter', id: 'dusun-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentDusun, options: [{ value: '', label: 'Semua dusun' }, { value: 'Dusun Barugaya', label: 'Dusun Barugaya' }, { value: 'Dusun Panaikang', label: 'Dusun Panaikang' }, { value: 'Dusun Bontomanai', label: 'Dusun Bontomanai' }] })}</div><div style="width:170px">${comboboxHtml({ name: 'gender-filter', id: 'gender-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.residentGender, options: [{ value: '', label: 'Semua jenis kelamin' }, { value: 'Laki-laki', label: 'Laki-laki' }, { value: 'Perempuan', label: 'Perempuan' }] })}</div><div class="toolbar-spacer"></div><button class="btn btn-sm btn-outline" data-action="reset-filter" data-scope="residents" ${hasFilter ? '' : 'disabled'}>${icon('x', 'sm')} Reset filter</button></div>
-    <div class="table-card"><table class="data-table"><thead><tr><th>NIK</th><th>Nama warga</th><th>Jenis kelamin</th><th>Tempat, tanggal lahir</th><th>Alamat</th><th>Status keluarga</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map((r, i) => `<tr><td class="primary">${esc(r.nik)}</td><td><div class="table-user"><span class="avatar ${i % 2 ? 'green' : ''}">${initials(r.name)}</span><span class="primary">${esc(r.name)}</span></div></td><td>${esc(r.gender)}</td><td>${esc(r.birth)}</td><td>${esc(r.address)}</td><td>${esc(r.status)}</td><td><div class="table-actions"><button class="icon-btn" data-action="view-resident" data-nik="${r.nik}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="edit-resident" data-nik="${r.nik}">${icon('edit', 'sm')}</button><button class="icon-btn icon-btn-danger" data-action="delete-resident" data-nik="${r.nik}" title="Hapus warga">${icon('x', 'sm')}</button></div></td></tr>`).join('') : `<tr><td colspan="7" class="empty-row">Tidak ada warga yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('residents', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} warga`)}</div>`;
+    ${viewToggle}
+    ${toolbar}
+    ${body}`;
+}
+
+function renderResidentsTable(filtered) {
+  const { pageItems, page, totalPages } = paginate(filtered, 'residents', 8);
+  return `<div class="table-card"><table class="data-table"><thead><tr><th>NIK</th><th>Nama warga</th><th>Jenis kelamin</th><th>Tempat, tanggal lahir</th><th>Alamat</th><th>Status keluarga</th><th>Klasifikasi</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map((r, i) => `<tr><td class="primary">${esc(r.nik)}</td><td><div class="table-user"><span class="avatar ${i % 2 ? 'green' : ''}">${initials(r.name)}</span><span class="primary">${esc(r.name)}</span></div></td><td>${esc(r.gender)}</td><td>${esc(r.birth)}</td><td>${esc(r.address)}</td><td>${esc(r.status)}</td><td><div class="tag-row"><span class="tag ${educationTagClass(r.education)}">${esc(r.education)}</span><span class="tag ${healthTagClass(r.health)}">${esc(r.health)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="view-resident" data-nik="${r.nik}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="edit-resident" data-nik="${r.nik}">${icon('edit', 'sm')}</button><button class="icon-btn icon-btn-danger" data-action="delete-resident" data-nik="${r.nik}" title="Hapus warga">${icon('x', 'sm')}</button></div></td></tr>`).join('') : `<tr><td colspan="8" class="empty-row">Tidak ada warga yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('residents', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} warga`)}</div>`;
+}
+
+function renderResidentsByKK(filtered) {
+  if (!filtered.length) return `<div class="table-card"><div class="empty-row">Tidak ada warga yang cocok dengan filter ini.</div></div>`;
+  const groups = {};
+  filtered.forEach(r => { const key = (r.kk || '').trim() || `Tanpa Nomor KK · ${r.address.split(',')[0] || '-'}`; (groups[key] = groups[key] || []).push(r); });
+  const sortedKeys = Object.keys(groups).sort((a, b) => {
+    const ha = groups[a].find(x => x.status === 'Kepala Keluarga')?.name || groups[a][0].name;
+    const hb = groups[b].find(x => x.status === 'Kepala Keluarga')?.name || groups[b][0].name;
+    return ha.localeCompare(hb);
+  });
+  return sortedKeys.map(key => {
+    const members = groups[key].slice().sort((a, b) => (a.status === 'Kepala Keluarga' ? -1 : b.status === 'Kepala Keluarga' ? 1 : 0));
+    const head = members.find(m => m.status === 'Kepala Keluarga');
+    const noKK = key.startsWith('Tanpa Nomor KK');
+    return `<div class="kk-group">
+      <div class="kk-group-head"><span class="avatar orange">${icon('home', 'sm')}</span><span><strong>${noKK ? 'Belum ada Nomor KK tercatat' : `Nomor KK ${esc(key)}`}</strong><br><span>${head ? `Kepala keluarga: ${esc(head.name)} · ` : ''}${members.length} anggota</span></span></div>
+      <div class="kk-group-members">${members.map(m => `<div class="kk-member"><span class="avatar">${initials(m.name)}</span><span><span class="primary">${esc(m.name)}</span><br><span class="opt-sub">${esc(m.status)} · ${esc(m.nik)}</span></span><div class="kk-member-meta"><span class="tag ${educationTagClass(m.education)}">${esc(m.education)}</span><span class="tag ${healthTagClass(m.health)}">${esc(m.health)}</span><button class="icon-btn" data-action="view-resident" data-nik="${m.nik}">${icon('eye', 'sm')}</button></div></div>`).join('')}</div>
+    </div>`;
+  }).join('');
 }
 function initials(name) { return name.replace(/[^A-Za-zÀ-ÿ ]/g, '').split(' ').filter(Boolean).slice(0, 2).map(x => x[0]).join('').toUpperCase() || 'WG'; }
 
@@ -643,7 +883,7 @@ function renderStatus() {
   return `${pageHeader('Status Surat', 'Pantau progres setiap usulan beserta catatan atau alasan dari kecamatan.', `<button class="btn btn-primary" data-action="new-letter">${icon('plus', 'sm')} Buat surat baru</button>`)}
     <div class="status-summary">${statusMini('Terkirim', counts.Terkirim, 'blue')}${statusMini('Diterima', counts.Diterima, 'orange')}${statusMini('Disetujui', counts.Disetujui, '')}${statusMini('Ditolak', counts.Ditolak, 'red')}</div>
     <div class="toolbar"><div class="toolbar-search"><span>${icon('search', 'sm')}</span><input id="status-search" value="${esc(state.statusSearch || '')}" placeholder="Cari nomor, jenis, atau warga..."></div><div style="width:150px">${comboboxHtml({ name: 'status-filter', id: 'status-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.statusFilter, options: ['Semua', 'Terkirim', 'Diterima', 'Disetujui', 'Ditolak'].map(s => ({ value: s, label: s })) })}</div><div style="width:150px">${comboboxHtml({ name: 'status-month', id: 'status-month', readOnly: true, size: 'combobox-sm', selectedValue: state.statusMonth, options: [{ value: '', label: 'Semua bulan' }, { value: 'Agustus 2026', label: 'Agustus 2026' }, { value: 'Juli 2026', label: 'Juli 2026' }] })}</div><div class="toolbar-spacer"></div><button class="btn btn-sm btn-outline" data-action="export" data-export="status">${icon('download', 'sm')} Unduh laporan</button></div>
-    <div class="table-card"><table class="data-table"><thead><tr><th>Nomor / Jenis</th><th>Nama warga</th><th>Tanggal</th><th>Status</th><th>Catatan / alasan</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map(l => `<tr><td><span class="primary">${esc(l.number)}</span><span class="secondary">${esc(l.type)}</span></td><td><span class="primary">${esc(l.citizen)}</span><span class="secondary">${esc(l.nik)}</span></td><td>${esc(l.date)}<span class="secondary">Diperbarui ${esc(l.updated)}</span></td><td>${statusBadge(l.status)}</td><td><div class="reason">${icon('info', 'sm')}<span>${esc(l.reason)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="view-letter" data-id="${l.id}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="download-letter-docx" data-id="${l.id}" title="Unduh dokumen Word">${icon('download', 'sm')}</button>${l.status === 'Disetujui' ? `<button class="icon-btn" data-action="print-letter" data-id="${l.id}">${icon('printer', 'sm')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6" class="empty-row">Tidak ada surat yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('status', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} surat`)}</div>`;
+    <div class="table-card"><table class="data-table"><thead><tr><th>Nomor / Jenis</th><th>Nama warga</th><th>Tanggal</th><th>Status</th><th>Catatan / alasan</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map(l => `<tr><td><span class="primary">${esc(l.number)}</span><span class="secondary">${esc(l.type)}</span></td><td><span class="primary">${esc(l.citizen)}</span><span class="secondary">${esc(l.nik)}</span></td><td>${esc(l.date)}<span class="secondary">Diperbarui ${esc(l.updated)}</span></td><td>${statusBadge(l.status)}</td><td><div class="reason">${icon('info', 'sm')}<span>${esc(l.reason)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="view-letter" data-id="${l.id}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="download-letter-docx" data-id="${l.id}" title="Unduh dokumen Word desa">${icon('download', 'sm')}</button>${l.status === 'Disetujui' ? `<button class="icon-btn" data-action="download-approval-docx" data-id="${l.id}" title="Unduh salinan TTD Camat">${icon('check', 'sm')}</button><button class="icon-btn" data-action="print-letter" data-id="${l.id}">${icon('printer', 'sm')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6" class="empty-row">Tidak ada surat yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('status', page, totalPages, `Menampilkan ${pageItems.length} dari ${filtered.length} surat`)}</div>`;
 }
 function statusMini(label, count, color) { return `<div class="status-mini"><i class="status-dot ${color}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`; }
 
@@ -678,7 +918,7 @@ function renderHistory() {
   const { pageItems, page, totalPages } = paginate(filtered, 'history', 8);
   return `${pageHeader('Riwayat Persuratan', `Arsip keputusan surat yang telah selesai diproses ${state.role === 'desa' ? `untuk ${state.currentVillage}` : 'oleh Kecamatan Polongbangkeng Timur'}.`, `<button class="btn btn-outline" data-action="export" data-export="history">${icon('download', 'sm')} Ekspor riwayat</button>`)}
     <div class="toolbar"><div class="toolbar-search"><span>${icon('search', 'sm')}</span><input id="history-search" value="${esc(state.historySearch || '')}" placeholder="Cari riwayat surat..."></div><div style="width:150px">${comboboxHtml({ name: 'history-status-filter', id: 'history-status-filter', readOnly: true, size: 'combobox-sm', selectedValue: state.historyStatusFilter, options: [{ value: '', label: 'Semua status' }, { value: 'Disetujui', label: 'Disetujui' }, { value: 'Ditolak', label: 'Ditolak' }] })}</div>${state.role === 'camat' ? `<div style="width:190px">${comboboxHtml({ name: 'history-village-filter', id: 'history-village-filter', selectedValue: state.historyVillageFilter, options: state.villages.map(v => ({ value: v.name, label: v.name })), placeholder: 'Semua desa', size: 'combobox-sm' })}</div>` : ''}<div style="width:150px">${comboboxHtml({ name: 'history-month', id: 'history-month', readOnly: true, size: 'combobox-sm', selectedValue: state.historyMonth, options: [{ value: '', label: 'Semua bulan' }, { value: 'Agustus 2026', label: 'Agustus 2026' }, { value: 'Juli 2026', label: 'Juli 2026' }] })}</div><div class="toolbar-spacer"></div></div>
-    <div class="table-card"><table class="data-table"><thead><tr><th>Tanggal keputusan</th><th>Nomor / jenis</th>${state.role === 'camat' ? '<th>Asal desa</th>' : '<th>Nama warga</th>'}<th>Status akhir</th><th>Alasan / catatan keputusan</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map(l => `<tr><td>${esc(l.updated)}</td><td><span class="primary">${esc(l.number)}</span><span class="secondary">${esc(l.type)}</span></td><td><span class="primary">${esc(state.role === 'camat' ? l.village : l.citizen)}</span><span class="secondary">${esc(l.nik)}</span></td><td>${statusBadge(l.status)}</td><td><div class="reason">${icon('info', 'sm')}<span>${esc(l.reason)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="${state.role === 'camat' ? 'review-letter' : 'view-letter'}" data-id="${l.id}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="print-letter" data-id="${l.id}">${icon('download', 'sm')}</button></div></td></tr>`).join('') : `<tr><td colspan="6" class="empty-row">Belum ada riwayat yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('history', page, totalPages, `${filtered.length} riwayat keputusan`)}</div>`;
+    <div class="table-card"><table class="data-table"><thead><tr><th>Tanggal keputusan</th><th>Nomor / jenis</th>${state.role === 'camat' ? '<th>Asal desa</th>' : '<th>Nama warga</th>'}<th>Status akhir</th><th>Alasan / catatan keputusan</th><th></th></tr></thead><tbody>${pageItems.length ? pageItems.map(l => `<tr><td>${esc(l.updated)}</td><td><span class="primary">${esc(l.number)}</span><span class="secondary">${esc(l.type)}</span></td><td><span class="primary">${esc(state.role === 'camat' ? l.village : l.citizen)}</span><span class="secondary">${esc(l.nik)}</span></td><td>${statusBadge(l.status)}</td><td><div class="reason">${icon('info', 'sm')}<span>${esc(l.reason)}</span></div></td><td><div class="table-actions"><button class="icon-btn" data-action="${state.role === 'camat' ? 'review-letter' : 'view-letter'}" data-id="${l.id}">${icon('eye', 'sm')}</button><button class="icon-btn" data-action="print-letter" data-id="${l.id}">${icon('download', 'sm')}</button>${l.status === 'Disetujui' ? `<button class="icon-btn" data-action="download-approval-docx" data-id="${l.id}" title="Unduh salinan TTD Camat">${icon('check', 'sm')}</button>` : ''}</div></td></tr>`).join('') : `<tr><td colspan="6" class="empty-row">Belum ada riwayat yang cocok dengan filter ini.</td></tr>`}</tbody></table>${paginationHtml('history', page, totalPages, `${filtered.length} riwayat keputusan`)}</div>`;
 }
 
 function renderCamatDashboard() {
@@ -851,12 +1091,14 @@ function openAddResident(existing = null) {
     <div class="field"><label class="form-label">Tempat, tanggal lahir</label><input name="birth" value="${esc(existing?.birth || '')}" placeholder="Takalar, 13 Agustus 1990" required></div>
     <div class="field span-2"><label class="form-label">Alamat lengkap</label><textarea name="address" style="min-height:70px" placeholder="Dusun, RT/RW..." required>${esc(existing?.address || '')}</textarea></div>
     <div class="field"><label class="form-label">Status dalam keluarga</label>${comboboxHtml({ name: 'family', readOnly: true, selectedValue: existing?.status || 'Kepala Keluarga', options: [{ value: 'Kepala Keluarga', label: 'Kepala Keluarga' }, { value: 'Istri', label: 'Istri' }, { value: 'Anak', label: 'Anak' }, { value: 'Lainnya', label: 'Lainnya' }] })}</div>
-    <div class="field"><label class="form-label">Nomor KK</label><input name="kk" maxlength="16" placeholder="16 digit nomor KK"></div>
+    <div class="field"><label class="form-label">Nomor KK</label><input name="kk" maxlength="16" value="${esc(existing?.kk || '')}" placeholder="16 digit nomor KK"><span class="helper">Warga dengan Nomor KK yang sama akan dikelompokkan sebagai satu keluarga.</span></div>
+    <div class="field"><label class="form-label">Klasifikasi pendidikan</label>${comboboxHtml({ name: 'education', readOnly: true, selectedValue: existing?.education || 'Tidak Diketahui', options: EDUCATION_LEVELS.map(v => ({ value: v, label: v })) })}</div>
+    <div class="field"><label class="form-label">Klasifikasi kesehatan</label>${comboboxHtml({ name: 'health', readOnly: true, selectedValue: existing?.health || 'Sehat', options: HEALTH_STATUSES.map(v => ({ value: v, label: v })) })}</div>
   </div></div><div class="modal-foot"><button type="button" class="btn btn-outline" data-action="close-modal">Batal</button><button type="submit" class="btn btn-primary">${icon('check', 'sm')} ${existing ? 'Simpan perubahan' : 'Simpan data warga'}</button></div></form>`);
 }
 
 function openResidentDetail(resident) {
-  openModal(`${modalHead('Detail warga', `Data penduduk ${state.currentVillage}.`, 'user')}<div class="modal-body"><div class="detail-list"><div class="detail-row"><span>NIK</span><strong>${esc(resident.nik)}</strong></div><div class="detail-row"><span>Nama lengkap</span><strong>${esc(resident.name)}</strong></div><div class="detail-row"><span>Jenis kelamin</span><strong>${esc(resident.gender)}</strong></div><div class="detail-row"><span>Tempat/Tgl lahir</span><strong>${esc(resident.birth)}</strong></div><div class="detail-row"><span>Alamat</span><strong>${esc(resident.address)}</strong></div><div class="detail-row"><span>Status keluarga</span><strong>${esc(resident.status)}</strong></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-primary" data-action="new-letter">${icon('mail', 'sm')} Buat surat</button></div>`);
+  openModal(`${modalHead('Detail warga', `Data penduduk ${state.currentVillage}.`, 'user')}<div class="modal-body"><div class="detail-list"><div class="detail-row"><span>NIK</span><strong>${esc(resident.nik)}</strong></div><div class="detail-row"><span>Nama lengkap</span><strong>${esc(resident.name)}</strong></div><div class="detail-row"><span>Jenis kelamin</span><strong>${esc(resident.gender)}</strong></div><div class="detail-row"><span>Tempat/Tgl lahir</span><strong>${esc(resident.birth)}</strong></div><div class="detail-row"><span>Alamat</span><strong>${esc(resident.address)}</strong></div><div class="detail-row"><span>Status keluarga</span><strong>${esc(resident.status)}</strong></div><div class="detail-row"><span>Nomor KK</span><strong>${esc(resident.kk || '-')}</strong></div><div class="detail-row"><span>Pendidikan</span><strong>${esc(resident.education)}</strong></div><div class="detail-row"><span>Kesehatan</span><strong>${esc(resident.health)}</strong></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-primary" data-action="new-letter">${icon('mail', 'sm')} Buat surat</button></div>`);
 }
 
 function openConfirmDeleteResident(resident) {
@@ -869,7 +1111,7 @@ async function documentPaper(letter, opts = {}) {
 
 async function openLetterView(letter) {
   const paper = await documentPaper(letter);
-  openModal(`${modalHead('Detail surat', `${letter.number} · ${letter.type}`, 'file')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${paper}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>ID surat</span><strong>${esc(letter.id)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Dikirim</span><strong>${esc(letter.updated)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div><div class="detail-row"><span>Catatan/alasan</span><strong>${esc(letter.reason)}</strong></div></div><div class="decision-box"><h4>Alur berikutnya</h4><p>${letter.status === 'Disetujui' ? 'Surat sudah dicetak di kecamatan. Warga dapat mengambil dan menandatangani dokumen di loket.' : letter.status === 'Ditolak' ? 'Perbaiki kekurangan sesuai alasan penolakan, lalu ajukan kembali.' : 'Surat sedang dalam alur pemeriksaan Kecamatan Polongbangkeng Timur.'}</p></div></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-secondary" data-action="download-letter-docx" data-id="${letter.id}">${icon('download', 'sm')} Unduh Word</button><button class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak pratinjau</button></div>`, 'modal-xl');
+  openModal(`${modalHead('Detail surat', `${letter.number} · ${letter.type}`, 'file')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${paper}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>ID surat</span><strong>${esc(letter.id)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Dikirim</span><strong>${esc(letter.updated)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div><div class="detail-row"><span>Catatan/alasan</span><strong>${esc(letter.reason)}</strong></div></div><div class="decision-box"><h4>Alur berikutnya</h4><p>${letter.status === 'Disetujui' ? 'Surat sudah dicetak di kecamatan. Warga dapat mengambil dan menandatangani dokumen di loket.' : letter.status === 'Ditolak' ? 'Perbaiki kekurangan sesuai alasan penolakan, lalu ajukan kembali.' : 'Surat sedang dalam alur pemeriksaan Kecamatan Polongbangkeng Timur.'}</p></div></div></div></div><div class="modal-foot"><button class="btn btn-outline" data-action="close-modal">Tutup</button><button class="btn btn-secondary" data-action="download-letter-docx" data-id="${letter.id}">${icon('download', 'sm')} Unduh Word Desa</button>${letter.status === 'Disetujui' ? `<button class="btn btn-secondary" data-action="download-approval-docx" data-id="${letter.id}">${icon('check', 'sm')} Unduh Salinan TTD Camat</button>` : ''}<button class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak pratinjau</button></div>`, 'modal-xl');
 }
 
 async function openReview(letter) {
@@ -877,7 +1119,7 @@ async function openReview(letter) {
   const paper = await documentPaper(letter);
   openModal(`<form id="decision-form" data-id="${letter.id}">${modalHead('Tinjau surat masuk', `${letter.village} · Dikirim ${letter.date}`, 'eye')}<div class="modal-body"><div class="review-grid"><div class="document-preview">${paper}</div><div class="review-info"><h3>Informasi pengajuan</h3><div class="detail-list"><div class="detail-row"><span>Nomor</span><strong>${esc(letter.number)}</strong></div><div class="detail-row"><span>Jenis surat</span><strong>${esc(letter.type)}</strong></div><div class="detail-row"><span>Asal desa</span><strong>${esc(letter.village)}</strong></div><div class="detail-row"><span>Nama warga</span><strong>${esc(letter.citizen)}</strong></div><div class="detail-row"><span>NIK</span><strong>${esc(letter.nik)}</strong></div><div class="detail-row"><span>Keperluan</span><strong>${esc(letter.purpose)}</strong></div><div class="detail-row"><span>Status</span><strong>${statusBadge(letter.status)}</strong></div></div>
     <div class="decision-box"><h4>Keputusan & alasan</h4><p>Setiap perubahan status wajib disertai alasan atau catatan untuk pihak desa.</p><div class="field" style="margin:0"><textarea name="reason" placeholder="Tulis hasil pemeriksaan atau alasan keputusan..." ${actionable ? 'required' : ''}>${actionable ? '' : esc(letter.reason)}</textarea></div></div></div></div></div>
-    <div class="modal-foot"><button type="button" class="btn btn-outline" data-action="close-modal">Tutup</button><button type="button" class="btn btn-secondary" data-action="download-letter-docx" data-id="${letter.id}">${icon('download', 'sm')} Unduh Word</button>${actionable ? `<button type="submit" name="decision" value="Ditolak" class="btn btn-danger-soft">${icon('x', 'sm')} Tolak</button>${letter.status === 'Terkirim' ? `<button type="submit" name="decision" value="Diterima" class="btn btn-secondary">${icon('mail', 'sm')} Terima berkas</button>` : ''}<button type="submit" name="decision" value="Disetujui" class="btn btn-primary">${icon('check', 'sm')} Setujui</button>` : `<button type="button" class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak surat</button>`}</div></form>`, 'modal-xl');
+    <div class="modal-foot"><button type="button" class="btn btn-outline" data-action="close-modal">Tutup</button><button type="button" class="btn btn-secondary" data-action="download-letter-docx" data-id="${letter.id}">${icon('download', 'sm')} Unduh Word</button>${actionable ? `<button type="submit" name="decision" value="Ditolak" class="btn btn-danger-soft">${icon('x', 'sm')} Tolak</button>${letter.status === 'Terkirim' ? `<button type="submit" name="decision" value="Diterima" class="btn btn-secondary">${icon('mail', 'sm')} Terima berkas</button>` : ''}<button type="submit" name="decision" value="Disetujui" class="btn btn-primary">${icon('check', 'sm')} Setujui</button>` : `${letter.status === 'Disetujui' ? `<button type="button" class="btn btn-secondary" data-action="download-approval-docx" data-id="${letter.id}">${icon('check', 'sm')} Unduh Salinan TTD Camat</button>` : ''}<button type="button" class="btn btn-secondary" data-action="print-letter" data-id="${letter.id}">${icon('printer', 'sm')} Cetak surat</button>`}</div></form>`, 'modal-xl');
 }
 
 function openTemplateEditor(type) {
@@ -982,6 +1224,8 @@ function templateGuideModal() {
     ['nomor_surat', 'Nomor urut surat'],
     ['jenis_surat', 'Nama jenis surat, misalnya "Surat Keterangan Domisili"'],
     ['nama_desa', 'Nama desa yang mengeluarkan surat'],
+    ['nama_penandatangan', 'Nama pejabat yang tanda tangan (otomatis: Kepala Desa atau Camat, tergantung siapa yang mencetak)'],
+    ['jabatan_penandatangan', 'Jabatan penandatangan (otomatis: "Kepala Desa" atau "Camat Polongbangkeng Timur")'],
   ];
   return `${modalHead('Panduan variabel template Word', 'Langkah lengkap supaya template Word terisi otomatis.', 'info')}
     <div class="modal-body">
@@ -994,12 +1238,33 @@ function templateGuideModal() {
       </ol>
       <h3 class="section-title">Daftar variabel yang bisa dipakai</h3>
       <div class="detail-list">${vars.map(([v, desc]) => `<div class="detail-row"><span class="tpl-var-tag">{{${v}}}</span><strong>${esc(desc)}</strong></div>`).join('')}</div>
-      <div class="small-note" style="margin-top:12px">${icon('info', 'sm')} Ketik variabel persis seperti di atas: huruf kecil semua, dua kurung kurawal di depan dan belakang, tanpa spasi tambahan di dalamnya. Salah ketik (mis. <code>{{Nama_Warga}}</code> atau <code>{ nama_warga }}</code>) membuat bagian itu tidak akan terisi.</div>
+      <h3 class="section-title" style="margin-top:14px">Tag tanda tangan elektronik (SATU tag untuk dua penandatangan)</h3>
+      <div class="detail-list"><div class="detail-row"><span class="tpl-var-tag">{{tanda_tangan}}</span><strong>Lokasi tanda tangan ditempel</strong></div></div>
+      <div class="small-note" style="margin-top:12px">${icon('info', 'sm')} Template ini dipakai untuk <b>surat yang sama persis</b>, dicetak dua kali dengan penandatangan berbeda: sekali oleh Kepala Desa (langsung setelah surat dibuat), sekali lagi oleh Camat (otomatis setelah disetujui). Taruh <code>{{tanda_tangan}}</code> di baris/paragraf TERSENDIRI di lokasi tanda tangan, lalu di bawahnya taruh <code>{{nama_penandatangan}}</code> dan <code>{{jabatan_penandatangan}}</code> — sistem otomatis mengisi gambar tanda tangan dan nama/jabatan yang sesuai setiap kali dokumen dicetak, tanpa kamu perlu bikin 2 template terpisah.</div>
+      <div class="small-note" style="margin-top:8px">${icon('info', 'sm')} Ketik variabel persis seperti di atas: huruf kecil semua, tanpa spasi tambahan di dalamnya. Salah ketik (mis. <code>{{Nama_Warga}}</code> atau <code>{ nama_warga }}</code>) membuat bagian itu tidak akan terisi.</div>
     </div>
     <div class="modal-foot"><button class="btn btn-primary" data-action="close-modal">${icon('check', 'sm')} Mengerti</button></div>`;
 }
 function profileModal() {
-  return `<form id="password-form">${modalHead('Profil & keamanan', state.role === 'camat' ? 'Admin Kecamatan Polongbangkeng Timur' : (state.currentVillage || 'Desa'), 'user')}<div class="modal-body"><div class="detail-list mb-14"><div class="detail-row"><span>Peran</span><strong>${state.role === 'camat' ? 'Camat / Admin Kecamatan' : 'Admin Desa'}</strong></div><div class="detail-row"><span>Nama</span><strong>${esc(state.profileName || '-')}</strong></div></div><label class="form-label">Ganti kata sandi</label><div class="field has-icon"><span class="prefix">${icon('lock', 'sm')}</span><input name="password" type="password" placeholder="Kata sandi baru (min. 6 karakter)" minlength="6" required></div></div><div class="modal-foot"><button type="button" class="btn btn-outline" data-action="logout">${icon('logout', 'sm')} Keluar</button><button type="submit" class="btn btn-primary">${icon('check', 'sm')} Simpan sandi baru</button></div></form>`;
+  return `<form id="password-form">${modalHead('Profil & keamanan', state.role === 'camat' ? 'Admin Kecamatan Polongbangkeng Timur' : (state.currentVillage || 'Desa'), 'user')}<div class="modal-body"><div class="detail-list mb-14"><div class="detail-row"><span>Peran</span><strong>${state.role === 'camat' ? 'Camat / Admin Kecamatan' : 'Admin Desa'}</strong></div><div class="detail-row"><span>Nama</span><strong>${esc(state.profileName || '-')}</strong></div></div><label class="form-label">Ganti kata sandi</label><div class="field has-icon"><span class="prefix">${icon('lock', 'sm')}</span><input name="password" type="password" placeholder="Kata sandi baru (min. 6 karakter)" minlength="6" required></div></div><div class="modal-foot"><button type="button" class="btn btn-outline" data-action="logout">${icon('logout', 'sm')} Keluar</button><button type="button" class="btn btn-secondary" data-action="open-signature">${icon('edit', 'sm')} Tanda tangan elektronik</button><button type="submit" class="btn btn-primary">${icon('check', 'sm')} Simpan sandi baru</button></div></form>`;
+}
+
+async function openSignatureModal() {
+  const scope = state.role === 'camat' ? 'camat' : 'desa';
+  const existing = await getSignatureImage(scope, state.currentVillageId);
+  openModal(`<form id="signature-form">${modalHead('Tanda tangan elektronik', scope === 'camat' ? 'Dipakai otomatis di setiap surat yang kamu setujui (salinan TTD Camat).' : 'Dipakai otomatis di setiap surat yang dibuat desa ini.', 'edit')}<div class="modal-body">
+    <div class="signature-preview" id="signature-preview">${existing ? `<img src="${existing.dataUrl}" alt="Tanda tangan tersimpan">` : `<span class="muted">Belum ada tanda tangan tersimpan</span>`}</div>
+    <label class="form-label">Foto tanda tangan (di atas kertas putih)</label>
+    <input type="file" name="signature-file" id="signature-file" accept="image/*" required>
+    <div class="small-note mt-8">${icon('info', 'sm')} Foto tanda tangan di atas kertas putih polos, cahaya cukup terang. Latar putihnya akan otomatis dihapus jadi transparan supaya nempel natural di surat.</div>
+  </div><div class="modal-foot"><button type="button" class="btn btn-outline" data-action="close-modal">Batal</button><button type="submit" class="btn btn-primary">${icon('check', 'sm')} Proses & simpan</button></div></form>`);
+  $('#signature-file')?.addEventListener('change', async e => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const { dataUrl } = await processSignatureImage(file);
+      const prev = $('#signature-preview'); if (prev) prev.innerHTML = `<img src="${dataUrl}" alt="Pratinjau tanda tangan">`;
+    } catch (err) { toast('Gagal membaca foto', err.message, 'error'); }
+  });
 }
 function openEditVillage(name) {
   const idx = findAccountIndexByVillage(name);
@@ -1023,6 +1288,8 @@ document.addEventListener('click', async e => {
   else if (action === 'close-modal') { closeModal(); }
   else if (action === 'backdrop' && e.target === el) { closeModal(); }
   else if (action === 'new-letter') { closeModal(); openNewLetter(el.dataset.type || ''); }
+  else if (action === 'resident-view-list') { state.residentView = 'list'; renderApp(); }
+  else if (action === 'resident-view-kk') { state.residentView = 'kk'; renderApp(); }
   else if (action === 'add-resident') { openAddResident(); }
   else if (action === 'edit-resident') { openAddResident(state.residents.find(r => r.nik === el.dataset.nik)); }
   else if (action === 'view-resident') { openResidentDetail(state.residents.find(r => r.nik === el.dataset.nik)); }
@@ -1043,6 +1310,7 @@ document.addEventListener('click', async e => {
   else if (action === 'edit-template') { openTemplateEditor(el.dataset.type); }
   else if (action === 'download-template') { setBtnLoading(el, 'Menyiapkan...'); await downloadTemplateForEditing(el.dataset.type); clearBtnLoading(el); }
   else if (action === 'download-letter-docx') { setBtnLoading(el, 'Menyiapkan...'); await downloadLetterDocx(findLetter(el.dataset.id)); clearBtnLoading(el); }
+  else if (action === 'download-approval-docx') { setBtnLoading(el, 'Menyiapkan...'); await downloadApprovalDocx(findLetter(el.dataset.id)); clearBtnLoading(el); }
   else if (action === 'add-account') { openAddAccount(); }
   else if (action === 'edit-account') { openAddAccount(state.accounts[+el.dataset.index], el.dataset.index); }
   else if (action === 'view-village') { openVillageDetail(state.villages.find(v => v.name === el.dataset.village)); }
@@ -1065,6 +1333,7 @@ document.addEventListener('click', async e => {
   else if (action === 'notifications') { openModal(notificationsModal()); }
   else if (action === 'help') { openModal(helpModal()); }
   else if (action === 'profile-menu') { openModal(profileModal()); }
+  else if (action === 'open-signature') { await openSignatureModal(); }
   else if (action === 'refresh') {
     setBtnLoading(el, 'Menyinkronkan...');
     await loadAllForRole();
@@ -1082,7 +1351,7 @@ document.addEventListener('click', async e => {
   }
   else if (action === 'reset-filter') {
     const scope = el.dataset.scope; state.pagination = state.pagination || {};
-    if (scope === 'residents') { state.residentSearch = ''; state.residentDusun = ''; state.residentGender = ''; }
+    if (scope === 'residents') { state.residentSearch = ''; state.residentDusun = ''; state.residentGender = ''; state.residentEducation = ''; state.residentHealth = ''; }
     if (scope === 'incoming') { state.incomingSearch = ''; state.letterFilter = 'Semua'; state.villageFilter = ''; }
     state.pagination[scope] = 1; renderApp();
   }
@@ -1142,6 +1411,15 @@ document.addEventListener('submit', async e => {
     if (error) { toast('Gagal mengganti sandi', error.message, 'error'); return; }
     closeModal(); toast('Sandi diperbarui', 'Gunakan kata sandi baru pada login berikutnya.');
   }
+  if (form.id === 'signature-form') {
+    const file = $('#signature-file')?.files?.[0];
+    if (!file) { toast('Pilih foto dulu', 'Unggah foto tanda tangan sebelum menyimpan.', 'error'); return; }
+    try {
+      const scope = state.role === 'camat' ? 'camat' : 'desa';
+      await saveSignature(scope, file);
+      closeModal(); toast('Tanda tangan tersimpan', 'Otomatis dipakai untuk surat berikutnya yang dibuat.');
+    } catch (err) { toast('Gagal menyimpan tanda tangan', err.message, 'error'); }
+  }
   if (form.id === 'new-letter-form') {
     const resident = state.residents.find(r => r.nik === fd.get('resident'));
     if (!resident) { toast('Data belum lengkap', 'Silakan pilih warga pemohon.', 'error'); return; }
@@ -1163,7 +1441,7 @@ document.addEventListener('submit', async e => {
   }
   if (form.id === 'resident-form') {
     const nik = fd.get('nik').trim(); const isEdit = state.residents.some(r => r.nik === nik);
-    const data = { nik, village_id: state.currentVillageId, name: fd.get('name'), gender: fd.get('gender'), birth_place_date: fd.get('birth'), address: fd.get('address'), family_status: fd.get('family') };
+    const data = { nik, village_id: state.currentVillageId, name: fd.get('name'), gender: fd.get('gender'), birth_place_date: fd.get('birth'), address: fd.get('address'), family_status: fd.get('family'), kk_number: fd.get('kk')?.trim() || null, education: fd.get('education') || 'Tidak Diketahui', health_status: fd.get('health') || 'Sehat' };
     const { error } = await sb.from('residents').upsert(data);
     if (error) { toast('Gagal menyimpan data warga', error.message, 'error'); return; }
     await loadResidents();
@@ -1183,8 +1461,12 @@ document.addEventListener('submit', async e => {
     const { error } = await sb.from('letters').update({ status: decision, reason, updated_at: new Date().toISOString() }).eq('id', letterId);
     if (error) { toast('Gagal menyimpan keputusan', error.message, 'error'); return; }
     const l = state.incoming.find(x => x.id === letterId);
+    if (decision === 'Disetujui' && l) {
+      try { await generateApprovalDocx(l); }
+      catch (err) { toast('Surat disetujui, salinan TTD Camat belum siap', `${err.message} Coba unduh lagi dari halaman Surat Masuk.`, 'error'); }
+    }
     await loadLettersCamat();
-    closeModal(); renderApp(); toast(`Surat ${decision.toLowerCase()}`, `Keputusan untuk ${l?.village || 'desa'} berhasil dikirim.`);
+    closeModal(); renderApp(); toast(`Surat ${decision.toLowerCase()}`, decision === 'Disetujui' ? `Salinan surat bertanda tangan Camat untuk ${l?.village || 'desa'} sudah otomatis dibuat — surat aslinya (TTD Kepala Desa) tetap ada, keduanya bisa diunduh terpisah.` : `Keputusan untuk ${l?.village || 'desa'} berhasil dikirim.`);
   }
   if (form.id === 'account-form') {
     const idx = form.dataset.index;
@@ -1218,6 +1500,8 @@ document.addEventListener('change', e => {
   else if (id === 'village-filter') { state.villageFilter = e.target.value; resetPage('incoming'); renderApp(); }
   else if (id === 'dusun-filter') { state.residentDusun = e.target.value; resetPage('residents'); renderApp(); }
   else if (id === 'gender-filter') { state.residentGender = e.target.value; resetPage('residents'); renderApp(); }
+  else if (id === 'education-filter') { state.residentEducation = e.target.value; resetPage('residents'); renderApp(); }
+  else if (id === 'health-filter') { state.residentHealth = e.target.value; resetPage('residents'); renderApp(); }
   else if (id === 'history-status-filter') { state.historyStatusFilter = e.target.value; resetPage('history'); renderApp(); }
   else if (id === 'history-village-filter') { state.historyVillageFilter = e.target.value; resetPage('history'); renderApp(); }
   else if (id === 'history-month') { state.historyMonth = e.target.value; resetPage('history'); renderApp(); }

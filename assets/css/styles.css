@@ -31,6 +31,13 @@
   --yellow-soft: #F3E9D5;
   --shadow: 0 1px 2px rgba(28, 36, 32, .07), 0 1px 1px rgba(28, 36, 32, .04);
   --shadow-lg: 0 24px 48px rgba(20, 26, 23, .20);
+  /* Tema gelap untuk backdrop aplikasi & sidebar */
+  --dark-bg: #0E271F;
+  --dark-bg-2: #12352A;
+  --dark-line: rgba(255, 255, 255, .1);
+  --dark-text: #FFFFFF;
+  --dark-text-muted: rgba(255, 255, 255, .62);
+  --dark-accent: #5FE3A6;
   --radius: 8px;
   --sidebar-w: 260px;
   --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
@@ -454,15 +461,15 @@ a {
   min-height: 100vh;
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
-  background: #f6f7f7;
+  background: var(--dark-bg);
 }
 
 .sidebar {
   position: fixed;
   inset: 0 auto 0 0;
   width: var(--sidebar-w);
-  background: #fff;
-  border-right: 1px solid var(--line);
+  background: var(--dark-bg-2);
+  border-right: 1px solid var(--dark-line);
   padding: 23px 17px 17px;
   display: flex;
   flex-direction: column;
@@ -472,7 +479,12 @@ a {
 
 .sidebar .brand {
   padding: 0 8px 22px;
-  border-bottom: 1px solid #eef0ef;
+  border-bottom: 1px solid var(--dark-line);
+  color: var(--dark-text);
+}
+
+.sidebar .brand-word small {
+  color: var(--dark-accent);
 }
 
 .sidebar .brand-mark {
@@ -487,8 +499,8 @@ a {
 
 .sidebar-context {
   margin: 18px 7px 12px;
-  background: var(--brand-4);
-  border: 1px solid var(--line-2);
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid var(--dark-line);
   border-radius: 8px;
   padding: 11px;
   display: flex;
@@ -499,18 +511,18 @@ a {
 .context-icon {
   width: 32px;
   height: 32px;
-  background: white;
-  color: var(--brand);
+  background: rgba(255, 255, 255, .1);
+  color: var(--dark-text);
   border-radius: 6px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--dark-line);
 }
 
 .sidebar-context strong {
   font-size: 11px;
   display: block;
-  color: var(--ink);
+  color: var(--dark-text);
   max-width: 145px;
   white-space: nowrap;
   overflow: hidden;
@@ -521,13 +533,13 @@ a {
 
 .sidebar-context span {
   font-size: 9px;
-  color: var(--muted);
+  color: var(--dark-text-muted);
   margin-top: 3px;
 }
 
 .nav-label {
   margin: 12px 11px 8px;
-  color: #9aa19d;
+  color: var(--dark-text-muted);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: .14em;
@@ -544,7 +556,7 @@ a {
   width: 100%;
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--dark-text-muted);
   border-radius: 6px;
   padding: 9px 12px;
   display: flex;
@@ -557,13 +569,13 @@ a {
 }
 
 .nav-item:hover {
-  background: var(--brand-4);
-  color: var(--brand);
+  background: rgba(255, 255, 255, .08);
+  color: var(--dark-text);
 }
 
 .nav-item.active {
-  background: transparent;
-  color: var(--brand);
+  background: rgba(255, 255, 255, .1);
+  color: var(--dark-text);
   font-weight: 700;
 }
 
@@ -573,7 +585,7 @@ a {
   width: 2px;
   height: 16px;
   border-radius: 0;
-  background: var(--brand);
+  background: var(--dark-accent);
   left: -17px;
   top: 50%;
   transform: translateY(-50%);
@@ -589,13 +601,13 @@ a {
   padding: 0 5px;
   font-size: 9px;
   font-family: var(--font-mono);
-  background: var(--soft);
-  color: var(--muted);
+  background: rgba(255, 255, 255, .1);
+  color: var(--dark-text-muted);
 }
 
 .nav-item.active .nav-badge {
-  background: var(--brand-3);
-  color: var(--brand);
+  background: rgba(95, 227, 166, .22);
+  color: var(--dark-accent);
 }
 
 .nav-spacer {
@@ -606,8 +618,9 @@ a {
   margin: 10px 3px 13px;
   padding: 14px;
   border-radius: 8px;
-  background: var(--brand-2);
-  color: white;
+  background: rgba(255, 255, 255, .08);
+  border: 1px solid var(--dark-line);
+  color: var(--dark-text);
   position: relative;
   overflow: hidden;
 }
@@ -645,11 +658,28 @@ a {
 }
 
 .sidebar-profile {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--dark-line);
   padding: 15px 6px 0;
   display: flex;
   align-items: center;
   gap: 9px;
+}
+
+.sidebar-profile .profile-copy strong {
+  color: var(--dark-text);
+}
+
+.sidebar-profile .profile-copy span {
+  color: var(--dark-text-muted);
+}
+
+.sidebar .icon-btn {
+  color: var(--dark-text-muted);
+}
+
+.sidebar .icon-btn:hover {
+  color: var(--dark-text);
+  background: rgba(255, 255, 255, .1);
 }
 
 .avatar {
@@ -1481,6 +1511,146 @@ a {
   border-color: rgba(162, 59, 50, .2);
 }
 
+/* Tag klasifikasi ringan — dipakai untuk pendidikan, kesehatan, dll */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 9.5px;
+  font-weight: 650;
+  font-family: var(--font-mono);
+  background: var(--soft);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tag.blue {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.tag.purple {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+.tag.orange {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.tag.red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.tag.green {
+  background: var(--brand-3);
+  color: var(--brand);
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+/* Kartu pengelompokan warga per Nomor KK */
+.kk-group {
+  background: white;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+
+.kk-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  background: var(--brand-4);
+  border-bottom: 1px solid var(--line-2);
+}
+
+.kk-group-head strong {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.kk-group-head span {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.kk-group-members {
+  display: flex;
+  flex-direction: column;
+}
+
+.kk-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line-2);
+}
+
+.kk-member:first-child {
+  border-top: 0;
+}
+
+.kk-member .primary {
+  font-size: 12px;
+}
+
+.kk-member-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* Pratinjau tanda tangan elektronik — pola kotak-kotak biar area transparan
+   pada PNG hasil proses kelihatan jelas (sama seperti pratinjau di Photoshop/Figma) */
+.signature-preview {
+  height: 130px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-image: linear-gradient(45deg, #eee 25%, transparent 25%), linear-gradient(-45deg, #eee 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+  background-color: #fafafa;
+}
+
+.signature-preview img {
+  max-height: 100px;
+  max-width: 90%;
+  object-fit: contain;
+}
+
+.signature-preview .muted {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#signature-file {
+  width: 100%;
+  border: 1px solid #D8D2C0;
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-size: 11.5px;
+  background: white;
+}
+
 .pagination {
   padding: 12px 15px;
   border-top: 1px solid var(--line-2);
@@ -1489,6 +1659,7 @@ a {
   justify-content: space-between;
   font-size: 9px;
   color: var(--muted);
+  margin-top: 10px;
 }
 
 .page-buttons {
@@ -2440,6 +2611,10 @@ a {
 
 .mb-14 {
   margin-bottom: 14px;
+}
+
+.mt-8 {
+  margin-top: 8px;
 }
 
 .section-title {
